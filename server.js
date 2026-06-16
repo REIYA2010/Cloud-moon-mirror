@@ -1,8 +1,9 @@
 const express = require('express');
-const fetch = require('node-fetch'); // ライブラリを明示的に読み込み
+const fetch = require('node-fetch'); // package.jsonに "node-fetch": "^2.7.0" が必要
 const app = express();
 
-const CF_WORKER_URL = "https://manga-api.myproxy0108.workers.dev";
+// あなたのCloudflare WorkerのURL
+const CF_WORKER_URL = "https://api-nemu.myproxy0108.workers.dev";
 
 app.all('*', async (req, res) => {
     try {
@@ -11,29 +12,28 @@ app.all('*', async (req, res) => {
         const response = await fetch(targetUrl, {
             method: req.method,
             headers: {
-                'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': req.headers['accept'] || '*/*',
-                'Accept-Language': req.headers['accept-language'] || 'ja,en-US;q=0.9',
+                // 自分のドメイン情報をWorkersに伝える（これで書き換えがRender向けになる）
+                'X-Forwarded-Host': req.get('host'),
+                'X-Forwarded-Proto': 'https',
+                'User-Agent': req.headers['user-agent'],
+                'Accept': req.headers['accept'],
                 'Cookie': req.headers['cookie'] || ''
             },
-            timeout: 30000 // 30秒まで待機（漫画サイト対策）
+            timeout: 30000
         });
 
-        // Workersからのレスポンスヘッダーをコピー
-        response.headers.forEach((v, k) => {
-            if (!['content-encoding', 'transfer-encoding'].includes(k.toLowerCase())) {
-                res.set(k, v);
-            }
-        });
+        // ヘッダーの引き継ぎ
+        const contentType = response.headers.get("content-type");
+        if (contentType) res.set("Content-Type", contentType);
+        res.set("Access-Control-Allow-Origin", "*");
 
         const buffer = await response.buffer();
         res.status(response.status).send(buffer);
 
     } catch (error) {
-        console.error("Critical Error:", error);
-        res.status(500).send("読み込みに失敗しました: " + error.message);
+        console.error(error);
+        res.status(500).send("読み込みに失敗しました。Workers側を確認してください。");
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(process.env.PORT || 3000);
