@@ -1,26 +1,44 @@
 const express = require('express');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const app = express();
 
 // あなたのCloudflare WorkerのURL
 const CF_WORKER_URL = "https://sika-sika-manga.myproxy0108.workers.dev";
 
 app.all('*', async (req, res) => {
-    // 1. Renderに届いたリクエストのパスとクエリをそのままWorkerへ飛ばす
-    const targetUrl = CF_WORKER_URL + req.url;
+    try {
+        // パスとクエリを引き継いでWorkerに飛ばす
+        const targetUrl = CF_WORKER_URL + req.url;
 
-    const response = await fetch(targetUrl, {
-        method: req.method,
-        headers: req.headers, // ブラウザからのヘッダーをそのまま渡す
-        body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined
-    });
+        // Node.js標準のfetchを使用（ライブラリ不要）
+        const response = await fetch(targetUrl, {
+            method: req.method,
+            headers: {
+                // 元のリクエストヘッダーからHost以外を引き継ぐ
+                ...req.headers,
+                'host': new URL(CF_WORKER_URL).host
+            },
+            // GET/HEAD以外の場合はボディを転送
+            body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined
+        });
 
-    // 2. Workerから返ってきた結果をそのままブラウザに返す
-    const contentType = response.headers.get("content-type");
-    res.set("Content-Type", contentType);
-    
-    const buffer = await response.arrayBuffer();
-    res.send(Buffer.from(buffer));
+        // レスポンスヘッダーの処理
+        response.headers.forEach((value, key) => {
+            res.set(key, value);
+        });
+
+        // データを取り出してブラウザに返す
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        res.status(response.status).send(buffer);
+
+    } catch (error) {
+        console.error("Fetch Error:", error);
+        res.status(500).send("Proxy Error");
+    }
 });
 
-app.listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
