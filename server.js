@@ -1,44 +1,37 @@
 const express = require('express');
 const app = express();
 
-// あなたのCloudflare WorkerのURL
-const CF_WORKER_URL = "https://sika-sika-manga.myproxy0108.workers.dev";
+const CF_WORKER_URL = "https://nemu-manga-api.myproxy0108.workers.dev";
 
 app.all('*', async (req, res) => {
     try {
-        // パスとクエリを引き継いでWorkerに飛ばす
         const targetUrl = CF_WORKER_URL + req.url;
 
-        // Node.js標準のfetchを使用（ライブラリ不要）
         const response = await fetch(targetUrl, {
             method: req.method,
             headers: {
-                // 元のリクエストヘッダーからHost以外を引き継ぐ
-                ...req.headers,
-                'host': new URL(CF_WORKER_URL).host
+                // ブラウザのヘッダーをそのまま渡すとRenderの情報が混じるので、
+                // 必要最小限に絞って「純粋なブラウザリクエスト」に見せかける
+                'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': req.headers['accept'] || '*/*',
+                'Accept-Language': req.headers['accept-language'] || 'ja,en-US;q=0.9',
+                'Cookie': req.headers['cookie'] || ''
             },
-            // GET/HEAD以外の場合はボディを転送
-            body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined
+            // タイムアウト設定（漫画サイトは重いため）
+            signal: AbortSignal.timeout(15000) 
         });
 
-        // レスポンスヘッダーの処理
-        response.headers.forEach((value, key) => {
-            res.set(key, value);
-        });
+        const contentType = response.headers.get("content-type");
+        if (contentType) res.set("Content-Type", contentType);
 
-        // データを取り出してブラウザに返す
+        // レスポンスをチャンクごとに流す（メモリ節約・高速化）
         const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        
-        res.status(response.status).send(buffer);
+        res.status(response.status).send(Buffer.from(arrayBuffer));
 
     } catch (error) {
-        console.error("Fetch Error:", error);
-        res.status(500).send("Proxy Error");
+        console.error("Critical Error:", error);
+        res.status(500).send("読み込みに失敗しました。サイト側が一時的に制限している可能性があります。");
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+app.listen(process.env.PORT || 3000);
