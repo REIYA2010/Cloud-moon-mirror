@@ -1,7 +1,7 @@
 const express = require('express');
 const fetch = require('node-fetch'); // ライブラリを明示的に読み込み
 const app = express();
-const CF_WORKER_URL = "https://manga-api-nemu.myproxy0108.workers.dev/";
+const CF_WORKER_URL = "https://mangarw-api-nemu.myproxy0108.workers.dev/";
 
 app.all('*', async (req, res) => {
     try {
