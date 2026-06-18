@@ -12,8 +12,8 @@ let requestCount = 0;
 
 const proxyAgent = new https.Agent({
     keepAlive: true,
-    maxSockets: 256,
-    timeout: 60000
+    maxSockets: 512,
+    timeout: 10000
 });
 
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
