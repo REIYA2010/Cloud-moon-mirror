@@ -16,7 +16,7 @@ const getWorker = () => CF_WORKER_URLS[workerIndex++ % CF_WORKER_URLS.length];
 // 通信安定化エージェント
 const proxyAgent = new https.Agent({
     keepAlive: true,
-    maxSockets: 256,
+    maxSockets: 600,
     timeout: 60000
 });
 
