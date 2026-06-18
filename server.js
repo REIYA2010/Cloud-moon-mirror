@@ -12,69 +12,67 @@ const CF_WORKER_URLS = [
 
 let requestCount = 0;
 
-// 【安定化の鍵】コネクションを閉じずに使い回す設定（Keep-Alive）
+// コネクションプールを最適化
 const proxyAgent = new https.Agent({
     keepAlive: true,
-    maxSockets: 100,      // 同時接続数を増やす
-    maxFreeSockets: 10,
-    timeout: 60000        // タイムアウトを1分に延長
+    maxSockets: 200,      // 同時接続枠をさらに拡大
+    maxFreeSockets: 50,
+    scheduling: 'lifo',   // 最新のコネクションを優先使用
+    timeout: 30000
 });
 
-app.use(express.raw({ type: '*/*', limit: '20mb' }));
-
 app.all('*', async (req, res) => {
-    try {
-        const workerIndex = requestCount % CF_WORKER_URLS.length;
-        const selectedWorker = CF_WORKER_URLS[workerIndex];
-        requestCount++;
+    const workerIndex = requestCount % CF_WORKER_URLS.length;
+    const selectedWorker = CF_WORKER_URLS[workerIndex];
+    requestCount++;
 
-        const targetUrl = selectedWorker + req.url;
+    const targetUrl = selectedWorker + req.url;
 
-        const proxyHeaders = {};
-        for (let [key, value] of Object.entries(req.headers)) {
-            if (!['host', 'content-encoding', 'content-length', 'connection'].includes(key.toLowerCase())) {
-                proxyHeaders[key] = value;
-            }
+    const proxyHeaders = {};
+    for (let [key, value] of Object.entries(req.headers)) {
+        if (!['host', 'content-encoding', 'connection'].includes(key.toLowerCase())) {
+            proxyHeaders[key] = value;
         }
+    }
+    proxyHeaders['X-Forwarded-Host'] = req.get('host');
+    proxyHeaders['X-Forwarded-Proto'] = 'https';
 
-        proxyHeaders['X-Forwarded-Host'] = req.get('host');
-        proxyHeaders['X-Forwarded-Proto'] = 'https';
-        
-        const fetchOptions = {
+    try {
+        const response = await fetch(targetUrl, {
             method: req.method,
             headers: proxyHeaders,
-            agent: proxyAgent, // 【重要】高速エージェントを適用
-            redirect: 'follow',
-            timeout: 15000     // 画像1枚に15秒以上かかったら次へ
-        };
+            agent: proxyAgent,
+            compress: false, // 圧縮解除をWorker側に任せて、Renderは中継に徹する
+            redirect: 'follow'
+        });
 
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-            fetchOptions.body = req.body;
-        }
-
-        const response = await fetch(targetUrl, fetchOptions);
-
-        // レスポンスヘッダーの設定
+        // ヘッダーの転送
         response.headers.forEach((v, k) => {
-            if (!['content-encoding', 'transfer-encoding', 'content-security-policy', 'x-frame-options'].includes(k.toLowerCase())) {
+            if (!['content-encoding', 'transfer-encoding', 'content-security-policy'].includes(k.toLowerCase())) {
                 res.set(k, v);
             }
         });
-        
-        // 画像のキャッシュをブラウザに指示（不安定さを解消）
-        if (req.url.includes('.webp') || req.url.includes('.jpg') || req.url.includes('.png')) {
-            res.set('Cache-Control', 'public, max-age=604800, immutable');
+
+        // 強力なキャッシュ指示（画像の場合）
+        if (req.url.includes('_proxy_') || /\.(webp|jpg|png|gif|css|js)$/.test(req.url)) {
+            res.set('Cache-Control', 'public, max-age=31536000, stale-while-revalidate=86400');
         }
 
-        res.set("Access-Control-Allow-Origin", "*");
+        res.status(response.status);
 
-        const buffer = await response.buffer();
-        res.status(response.status).send(buffer);
+        // 【最速化のポイント】ストリーミング転送
+        // response.buffer() を待たずに、届いたパケットをそのままresに流し込む
+        response.body.pipe(res);
+
+        // エラーハンドリング
+        response.body.on('error', (err) => {
+            console.error('Stream Error:', err);
+            res.end();
+        });
 
     } catch (error) {
-        // タイムアウトや切断が起きてもサーバーを落とさない
         if (!res.headersSent) {
-            res.status(504).send("Timeout or Connection Error");
+            res.status(502).send("Gateway Timeout");
         }
     }
 });
