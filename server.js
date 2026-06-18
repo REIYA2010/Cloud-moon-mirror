@@ -7,7 +7,6 @@ const app = express();
 // 1. あなたのWorker URLをここに入れる
 const CF_WORKER_URLS = [
     "https://api-nemu.myproxy0108.workers.dev",
-    "https://api-mangaraw.myproxy0108.workers.dev",
     "https://mangarw-api.72016.workers.dev"
 ];
 
