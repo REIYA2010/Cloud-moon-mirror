@@ -12,12 +12,9 @@ const CF_WORKER_URLS = [
 
 let requestCount = 0;
 
-// コネクションプールを最適化
 const proxyAgent = new https.Agent({
     keepAlive: true,
-    maxSockets: 200,      // 同時接続枠をさらに拡大
-    maxFreeSockets: 50,
-    scheduling: 'lifo',   // 最新のコネクションを優先使用
+    maxSockets: 200,
     timeout: 30000
 });
 
@@ -30,7 +27,8 @@ app.all('*', async (req, res) => {
 
     const proxyHeaders = {};
     for (let [key, value] of Object.entries(req.headers)) {
-        if (!['host', 'content-encoding', 'connection'].includes(key.toLowerCase())) {
+        // hostとaccept-encodingをあえて消し、node-fetchに制御を任せる
+        if (!['host', 'connection', 'accept-encoding'].includes(key.toLowerCase())) {
             proxyHeaders[key] = value;
         }
     }
@@ -42,40 +40,48 @@ app.all('*', async (req, res) => {
             method: req.method,
             headers: proxyHeaders,
             agent: proxyAgent,
-            compress: false, // 圧縮解除をWorker側に任せて、Renderは中継に徹する
+            compress: true, // 【重要】ここでnode-fetchに自動解凍させる（文字化け防止）
             redirect: 'follow'
         });
 
-        // ヘッダーの転送
+        // ブラウザへ返すヘッダーの整理
         response.headers.forEach((v, k) => {
-            if (!['content-encoding', 'transfer-encoding', 'content-security-policy'].includes(k.toLowerCase())) {
+            const key = k.toLowerCase();
+            // 以下のヘッダーはRender側で新しく生成・制御するため、コピーしない
+            if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy', 'x-frame-options'].includes(key)) {
                 res.set(k, v);
             }
         });
 
-        // 強力なキャッシュ指示（画像の場合）
+        // 文字化け対策：Content-Typeにcharset=utf-8を強制付与（HTMLの場合）
+        let contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("text/html") && !contentType.includes("charset")) {
+            res.set("Content-Type", contentType + "; charset=utf-8");
+        }
+
+        // キャッシュ制御
         if (req.url.includes('_proxy_') || /\.(webp|jpg|png|gif|css|js)$/.test(req.url)) {
-            res.set('Cache-Control', 'public, max-age=31536000, stale-while-revalidate=86400');
+            res.set('Cache-Control', 'public, max-age=31536000, immutable');
         }
 
         res.status(response.status);
 
-        // 【最速化のポイント】ストリーミング転送
-        // response.buffer() を待たずに、届いたパケットをそのままresに流し込む
+        // ストリーミング転送
+        // node-fetchが解凍した生のデータを、そのままブラウザに流し込む
         response.body.pipe(res);
 
-        // エラーハンドリング
         response.body.on('error', (err) => {
             console.error('Stream Error:', err);
-            res.end();
+            if (!res.headersSent) res.end();
         });
 
     } catch (error) {
+        console.error('Proxy Fatal Error:', error);
         if (!res.headersSent) {
-            res.status(502).send("Gateway Timeout");
+            res.status(502).send("Proxy error occurred.");
         }
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT);
+app.listen(PORT, () => console.log("Streaming Proxy running..."));
