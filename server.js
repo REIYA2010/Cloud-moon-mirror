@@ -8,46 +8,70 @@ const app = express();
 // ==========================================
 const CF_WORKER_URLS = [
     "https://mangarw-api.myproxy0108.workers.dev",
-    "https://api-nemu.myproxy0108.workers.dev"
+    "https://api-nemu.myproxy0108.workers.dev",
+    "https://sika-sika-manga.myproxy0108.workers.dev"
 ];
 let workerIndex = 0;
 const getWorker = () => CF_WORKER_URLS[workerIndex++ % CF_WORKER_URLS.length];
 
-// ==========================================
-// 2. 高速化：通信エージェント設定
-// ==========================================
 const proxyAgent = new https.Agent({
     keepAlive: true,
-    maxSockets: 512,      // 並列読み込み数を最大化
-    maxFreeSockets: 128,
-    timeout: 60000,       // 1分でタイムアウト
-    scheduling: 'lifo'
+    maxSockets: 256,
+    timeout: 60000
 });
 
-// ボディ解析リミット（漫画データ転送用）
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 3. メイン転送ロジック（すべてをWorkerへ）
+// 2. 広告削除用エンジン（正規表現）
+// ==========================================
+const adBlockPatterns = [
+    /<script[^>]*universityshocksooner\.com[^>]*><\/script>/gi,
+    /<script[^>]*adexchangerapid\.com[^>]*><\/script>/gi,
+    /<script[^>]*platform\.pubadx\.one[^>]*><\/script>/gi,
+    /<script[^>]*gomuraw\.js[^>]*><\/script>/gi,
+    /<a[^>]*adexchangerapid\.com[^>]*>.*?<\/a>/gi, // あなたが指摘した末尾のリンク
+    /<div[^>]*id="bg-ssp"[^>]*>[\s\S]*?<\/div>/gi,   // 広告コンテナ
+    /https:\/\/universityshocksooner\.com\/[^"'\s]+/gi,
+    /https:\/\/adexchangerapid\.com\/[^"'\s]+/gi
+];
+
+// 注入する「広告殺し」のCSS/JS
+const adKillerCode = `
+<style>
+  iframe, [class*="ad-"], [id*="ad-"], .pop--excl, .bg-ssp-11557, 
+  [style*="z-index: 2147483647"], [style*="z-index: 9999"], #toast { 
+    display: none !important; visibility: hidden !important; pointer-events: none !important; 
+  }
+</style>
+<script>
+  // 動的に現れる透明な板を削除
+  setInterval(() => {
+    document.querySelectorAll('div, a').forEach(el => {
+      const s = window.getComputedStyle(el);
+      if (parseInt(s.zIndex) > 1000 && (s.opacity === '0' || s.backgroundColor.includes('0)'))) {
+        el.remove();
+      }
+    });
+  }, 1000);
+</script>
+`;
+
+// ==========================================
+// 3. メイン転送ロジック
 // ==========================================
 app.all('*', async (req, res) => {
-    //  faviconのリクエストなどは軽く流す
     if (req.url === '/favicon.ico') return res.status(204).end();
 
     const selectedWorker = getWorker();
     const targetUrl = selectedWorker + req.url;
 
-    // ヘッダーの徹底クリーニング（Bot検知・文字化け・エラー対策）
+    // ヘッダーのクリーニング
     const cleanHeaders = {};
     const skipHeaders = ['host', 'connection', 'content-length', 'content-encoding', 'cf-ray', 'cf-connecting-ip', 'x-real-ip'];
-    
     Object.keys(req.headers).forEach(key => {
-        if (!skipHeaders.includes(key.toLowerCase())) {
-            cleanHeaders[key] = req.headers[key];
-        }
+        if (!skipHeaders.includes(key.toLowerCase())) cleanHeaders[key] = req.headers[key];
     });
-
-    // 自分のドメイン情報をWorkersへ渡す（リンク書き換えの同期用）
     cleanHeaders['X-Forwarded-Host'] = req.get('host');
     cleanHeaders['X-Forwarded-Proto'] = 'https';
 
@@ -56,53 +80,53 @@ app.all('*', async (req, res) => {
             method: req.method,
             headers: cleanHeaders,
             agent: proxyAgent,
-            compress: true, // Render側で解凍（文字化け防止の要）
+            compress: true, 
             redirect: 'follow',
             body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
         });
 
-        // レスポンスヘッダーの整理
+        // レスポンスヘッダーの設定
         response.headers.forEach((v, k) => {
             const key = k.toLowerCase();
-            // 不具合の元になるヘッダーを除外
             if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy', 'x-frame-options'].includes(key)) {
                 res.set(k, v);
             }
         });
 
-        // 強力なキャッシュ命令（画像・静的ファイル）
-        if (req.url.includes('_p_') || /\.(webp|jpg|png|gif|css|js|woff2|ico)$/.test(req.url)) {
+        const contentType = response.headers.get("content-type") || "";
+
+        // --- 4. 広告削除の実行（HTML/JS/CSSの場合） ---
+        if (contentType.includes("text/html") || contentType.includes("javascript")) {
+            let text = await response.text();
+
+            // 正規表現で広告コードを根こそぎ消す
+            adBlockPatterns.forEach(pattern => {
+                text = text.replace(pattern, "");
+            });
+
+            // HTMLなら広告ブロックコードを注入
+            if (contentType.includes("text/html")) {
+                text = text.replace('<head>', '<head>' + adKillerCode);
+                // 文字化け対策
+                if (!contentType.includes("charset")) res.set("Content-Type", "text/html; charset=utf-8");
+            }
+
+            return res.status(response.status).send(text);
+        }
+
+        // --- 5. 画像などは爆速ストリーミングで流す ---
+        if (req.url.includes('_p_') || /\.(webp|jpg|png|gif)$/.test(req.url)) {
             res.set('Cache-Control', 'public, max-age=31536000, immutable');
         }
 
-        // 文字化け強制防止（HTMLの場合）
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("text/html") && !contentType.includes("charset")) {
-            res.set("Content-Type", contentType + "; charset=utf-8");
-        }
-
         res.status(response.status);
-
-        // 【爆速ストリーミング】データが届いたそばからブラウザに流す
         response.body.pipe(res);
 
-        // 転送エラー時の処理
-        response.body.on('error', (err) => {
-            console.error('[Stream Error]', err.message);
-            if (!res.headersSent) res.end();
-        });
-
     } catch (error) {
-        console.error('[Fetch Error]', error.message);
-        if (!res.headersSent) {
-            res.status(502).send("通信エラー: Workerに接続できませんでした。");
-        }
+        console.error('[Fatal]', error.message);
+        if (!res.headersSent) res.status(502).send("Proxy Error");
     }
 });
 
-// ポート起動
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`--- FAST MANGA PROXY ONLINE ---`);
-    console.log(`Targeting through ${CF_WORKER_URLS.length} Workers`);
-});
+app.listen(PORT, () => console.log(`Super Clean Proxy running on ${PORT}`));
