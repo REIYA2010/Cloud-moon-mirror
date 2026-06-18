@@ -3,9 +3,6 @@ const fetch = require('node-fetch');
 const https = require('https');
 const app = express();
 
-// ==========================================
-// 1. 設定：心臓部（Cloudflare Workers）
-// ==========================================
 const CF_WORKER_URLS = [
     "https://mangarw-api.myproxy0108.workers.dev",
     "https://api-nemu.myproxy0108.workers.dev",
@@ -14,64 +11,58 @@ const CF_WORKER_URLS = [
 let workerIndex = 0;
 const getWorker = () => CF_WORKER_URLS[workerIndex++ % CF_WORKER_URLS.length];
 
-const proxyAgent = new https.Agent({
-    keepAlive: true,
-    maxSockets: 256,
-    timeout: 60000
-});
-
+const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 256, timeout: 60000 });
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
-// ==========================================
-// 2. 広告削除用エンジン（正規表現）
-// ==========================================
+// --- 広告削除エンジンの修正（ボタンを巻き込まないようにドメイン指定に限定） ---
 const adBlockPatterns = [
+    /https?:\/\/universityshocksooner\.com\/[^"'\s]+/gi,
+    /https?:\/\/adexchangerapid\.com\/[^"'\s]+/gi,
+    /https?:\/\/platform\.pubadx\.one\/[^"'\s]+/gi,
     /<script[^>]*universityshocksooner\.com[^>]*><\/script>/gi,
     /<script[^>]*adexchangerapid\.com[^>]*><\/script>/gi,
-    /<script[^>]*platform\.pubadx\.one[^>]*><\/script>/gi,
     /<script[^>]*gomuraw\.js[^>]*><\/script>/gi,
-    /<a[^>]*adexchangerapid\.com[^>]*>.*?<\/a>/gi, // あなたが指摘した末尾のリンク
-    /<div[^>]*id="bg-ssp"[^>]*>[\s\S]*?<\/div>/gi,   // 広告コンテナ
-    /https:\/\/universityshocksooner\.com\/[^"'\s]+/gi,
-    /https:\/\/adexchangerapid\.com\/[^"'\s]+/gi
+    /<a[^>]*adexchangerapid\.com[^>]*>.*?<\/a>/gi, // 末尾の隠しリンク
+    /universityshocksooner\.com/gi
 ];
 
-// 注入する「広告殺し」のCSS/JS
+// --- 注入コードの修正（UIを壊さない安全な設定） ---
 const adKillerCode = `
 <style>
-  iframe, [class*="ad-"], [id*="ad-"], .pop--excl, .bg-ssp-11557, 
-  [style*="z-index: 2147483647"], [style*="z-index: 9999"], #toast { 
-    display: none !important; visibility: hidden !important; pointer-events: none !important; 
+  /* 特定の既知の広告ID/クラスのみを隠す */
+  iframe[src*="googleads"], iframe[src*="doubleclick"], 
+  .pop--excl, .bg-ssp-11557, [id*="bg-ssp"],
+  #initial-loader, #toast { 
+    display: none !important; visibility: hidden !important; 
+  }
+  /* 続きを読むボタン（load-more-chapters）は絶対に消さないように強制表示 */
+  #load-more-chapters, .load-more, .read-more {
+    display: block !important; visibility: visible !important; opacity: 1 !important;
   }
 </style>
 <script>
-  // 動的に現れる透明な板を削除
-  setInterval(() => {
-    document.querySelectorAll('div, a').forEach(el => {
+  // 透明なオーバーレイのみを狙い撃ちして削除
+  const killGhostAds = () => {
+    document.querySelectorAll('div').forEach(el => {
       const s = window.getComputedStyle(el);
-      if (parseInt(s.zIndex) > 1000 && (s.opacity === '0' || s.backgroundColor.includes('0)'))) {
+      // z-indexが異常に高く、中身が空っぽ、あるいは透明な板を削除
+      if (parseInt(s.zIndex) > 10000 && s.opacity === '0' && el.innerText.length === 0) {
         el.remove();
       }
     });
-  }, 1000);
+  };
+  setInterval(killGhostAds, 1000);
 </script>
 `;
 
-// ==========================================
-// 3. メイン転送ロジック
-// ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
-
     const selectedWorker = getWorker();
     const targetUrl = selectedWorker + req.url;
 
-    // ヘッダーのクリーニング
     const cleanHeaders = {};
-    const skipHeaders = ['host', 'connection', 'content-length', 'content-encoding', 'cf-ray', 'cf-connecting-ip', 'x-real-ip'];
-    Object.keys(req.headers).forEach(key => {
-        if (!skipHeaders.includes(key.toLowerCase())) cleanHeaders[key] = req.headers[key];
-    });
+    const skip = ['host', 'connection', 'content-length', 'content-encoding', 'cf-ray', 'cf-connecting-ip'];
+    Object.keys(req.headers).forEach(k => { if(!skip.includes(k.toLowerCase())) cleanHeaders[k] = req.headers[k]; });
     cleanHeaders['X-Forwarded-Host'] = req.get('host');
     cleanHeaders['X-Forwarded-Proto'] = 'https';
 
@@ -85,48 +76,32 @@ app.all('*', async (req, res) => {
             body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
         });
 
-        // レスポンスヘッダーの設定
         response.headers.forEach((v, k) => {
-            const key = k.toLowerCase();
-            if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy', 'x-frame-options'].includes(key)) {
+            if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy', 'x-frame-options'].includes(k.toLowerCase())) {
                 res.set(k, v);
             }
         });
 
         const contentType = response.headers.get("content-type") || "";
 
-        // --- 4. 広告削除の実行（HTML/JS/CSSの場合） ---
-        if (contentType.includes("text/html") || contentType.includes("javascript")) {
+        // HTMLの時だけ広告除去を行う
+        if (contentType.includes("text/html")) {
             let text = await response.text();
-
-            // 正規表現で広告コードを根こそぎ消す
-            adBlockPatterns.forEach(pattern => {
-                text = text.replace(pattern, "");
-            });
-
-            // HTMLなら広告ブロックコードを注入
-            if (contentType.includes("text/html")) {
-                text = text.replace('<head>', '<head>' + adKillerCode);
-                // 文字化け対策
-                if (!contentType.includes("charset")) res.set("Content-Type", "text/html; charset=utf-8");
-            }
-
+            adBlockPatterns.forEach(p => { text = text.replace(p, ""); });
+            text = text.replace('<head>', '<head>' + adKillerCode);
+            if (!contentType.includes("charset")) res.set("Content-Type", "text/html; charset=utf-8");
             return res.status(response.status).send(text);
         }
 
-        // --- 5. 画像などは爆速ストリーミングで流す ---
-        if (req.url.includes('_p_') || /\.(webp|jpg|png|gif)$/.test(req.url)) {
-            res.set('Cache-Control', 'public, max-age=31536000, immutable');
-        }
-
+        // 画像などはストリーミング
+        if (req.url.includes('_p_')) res.set('Cache-Control', 'public, max-age=31536000, immutable');
         res.status(response.status);
         response.body.pipe(res);
 
     } catch (error) {
-        console.error('[Fatal]', error.message);
-        if (!res.headersSent) res.status(502).send("Proxy Error");
+        if (!res.headersSent) res.status(502).end();
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Super Clean Proxy running on ${PORT}`));
+app.listen(PORT);
