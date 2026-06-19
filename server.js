@@ -63,7 +63,7 @@ const INJECT_CODE = `
         if (el.href && (el.href.includes('adex') || el.href.includes('university'))) el.remove();
       });
     };
-    setInterval(nuke, 1000);
+    setInterval(nuke, 2000);
 
     // 3. 画像の5枚先読み（高速化）
     const prefetch = () => {
@@ -77,7 +77,7 @@ const INJECT_CODE = `
             }
           }
         });
-      }, { rootMargin: '800px' });
+      }, { rootMargin: '1000px' });
       imgs.forEach(img => obs.observe(img));
     };
     document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', prefetch) : prefetch();
