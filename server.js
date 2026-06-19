@@ -77,7 +77,7 @@ const INJECT_CODE = `
             }
           }
         });
-      }, { rootMargin: '1000px' });
+      }, { rootMargin: '3000px' });
       imgs.forEach(img => obs.observe(img));
     };
     document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', prefetch) : prefetch();
