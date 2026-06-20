@@ -12,7 +12,7 @@ const getWorker = () => CF_WORKER_URLS[workerIndex++ % CF_WORKER_URLS.length];
 
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 150 });
 
-// 広告削除用コード
+// 広告ブロック ＆ 先読みエンジン（前回と同じ最強版）
 const INJECT_CODE = `
 <style>
   iframe, .pop--excl, .bg-ssp-11557, [id*="bg-ssp"], [class*="ad-"], 
@@ -39,7 +39,7 @@ const INJECT_CODE = `
             for(let i=1; i<=5; i++) if(imgs[idx+i]) imgs[idx+i].src = imgs[idx+i].dataset.src;
           }
         });
-      }, { rootMargin: '1000px' });
+      }, { rootMargin: '1200px' });
       imgs.forEach(img => obs.observe(img));
     };
     document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', prefetch) : prefetch();
@@ -54,14 +54,12 @@ app.all('*', async (req, res) => {
     const targetUrl = selectedWorker + req.url;
     const currentHost = req.get('host');
 
-    // 1. ヘッダーの整理
     const cleanHeaders = {};
     for (let key in req.headers) {
         if (!['host', 'connection', 'content-length', 'content-encoding', 'accept-encoding'].includes(key.toLowerCase())) {
             cleanHeaders[key] = req.headers[key];
         }
     }
-    // 【文字化け対策の核心】Workerに圧縮させない
     cleanHeaders['accept-encoding'] = 'identity';
     cleanHeaders['X-Forwarded-Host'] = currentHost;
     cleanHeaders['X-Forwarded-Proto'] = 'https';
@@ -71,30 +69,36 @@ app.all('*', async (req, res) => {
             method: req.method,
             headers: cleanHeaders,
             agent: proxyAgent,
-            compress: true, 
+            compress: true,
             redirect: 'follow',
             body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
         });
 
-        // 2. 応答ヘッダーの整理（圧縮ヘッダーを捨てる）
-        response.headers.forEach((v, k) => {
-            const key = k.toLowerCase();
-            if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy', 'x-frame-options'].includes(key)) {
-                res.set(k, v);
-            }
-        });
-
         const contentType = response.headers.get("content-type") || "";
 
-        // --- HTML・テキスト処理モード ---
-        if (contentType.includes("text/html") || contentType.includes("application/javascript") || contentType.includes("text/css")) {
-            // 文字コードを明示的に指定して取得（文字化け防止）
+        // --- 1. 重要：画像プロキシリクエストの処理 ---
+        if (req.url.includes('_p_') || contentType.includes("image")) {
+            const buffer = await response.buffer();
+            
+            // 画像用ヘッダー設定
+            res.set({
+                "Content-Type": contentType,
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "X-Proxy-Status": "Image-Active"
+            });
+            
+            return res.status(response.status).send(buffer);
+        }
+
+        // --- 2. HTML/Text 処理モード（文字化け対策込み） ---
+        if (contentType.includes("text/html") || contentType.includes("javascript") || contentType.includes("css")) {
             const buffer = await response.arrayBuffer();
             const decoder = new TextDecoder('utf-8');
             let text = decoder.decode(buffer);
 
             if (contentType.includes("text/html")) {
-                // 広告ドメインの物理消去
+                // 広告削除
                 const adDomains = ['universityshocksooner.com', 'adexchangerapid.com', 'platform.pubadx.one', 'gomuraw.js'];
                 adDomains.forEach(d => {
                     text = text.replace(new RegExp('<script[^>]*' + d.replace('.', '\\.') + '[^>]*><\\/script>', 'gi'), "");
@@ -102,24 +106,22 @@ app.all('*', async (req, res) => {
                 });
                 text = text.replace(/<a[^>]*adexchangerapid\.com[^>]*>.*?<\/a>/gi, "");
                 
-                // ドメイン同期
+                // ドメイン同期 ＆ 広告殺し注入
                 text = text.split("myproxy0108.workers.dev").join(currentHost);
-                
-                // コード注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 
                 res.set("Content-Type", "text/html; charset=utf-8");
+            } else {
+                res.set("Content-Type", contentType);
             }
 
+            res.set("Access-Control-Allow-Origin", "*");
             return res.status(response.status).send(text);
         }
 
-        // --- バイナリ（画像）モード ---
-        if (req.url.includes('_p_')) {
-            res.set('Cache-Control', 'public, max-age=31536000, immutable');
-        }
-        
+        // --- 3. その他（JSONなど） ---
         const finalBuffer = await response.buffer();
+        res.set("Access-Control-Allow-Origin", "*");
         res.status(response.status).send(finalBuffer);
 
     } catch (error) {
