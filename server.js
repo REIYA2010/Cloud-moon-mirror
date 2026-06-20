@@ -16,7 +16,7 @@ let globalIndex = 0;
 const proxyAgent = new https.Agent({
     keepAlive: true,
     maxSockets: 512,
-    maxFreeSockets: 128,
+    maxFreeSockets: 256,
     timeout: 90000,
     scheduling: 'lifo'
 });
@@ -91,7 +91,7 @@ const INJECT_CODE = `
             }
           }
         });
-      }, { rootMargin: '1000px' });
+      }, { rootMargin: 2000px' });
       images.forEach(img => { if (img.dataset.src) observer.observe(img); });
     };
     document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', initPrefetch) : initPrefetch();
