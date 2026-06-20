@@ -8,7 +8,7 @@ const app = express();
 // ==========================================
 const CF_WORKER_URLS = [
     "https://api-nemu.myproxy0108.workers.dev",
-    "https://mangarw-api.73016.workers.dev"
+    "https://mangarw-api.72016.workers.dev"
 ];
 let workerIndex = 0;
 const getWorker = () => CF_WORKER_URLS[workerIndex++ % CF_WORKER_URLS.length];
