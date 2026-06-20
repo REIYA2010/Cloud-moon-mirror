@@ -4,7 +4,7 @@ const https = require('https');
 const app = express();
 
 // ==========================================
-// 1. 設定：心臓部（Cloudflare Workers）
+// 1. 設定：分散用Worker URL（あなたのURLに同期）
 // ==========================================
 const CF_WORKER_URLS = [
     "https://mangarw-api.72016.workers.dev",
@@ -12,86 +12,93 @@ const CF_WORKER_URLS = [
 ];
 let globalIndex = 0;
 
+// 通信安定化エージェント
 const proxyAgent = new https.Agent({
     keepAlive: true,
-    maxSockets: 600,
+    maxSockets: 512,
     timeout: 60000
 });
 
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 注入：1秒おき透明ボタン監視・抹殺スクリプト
+// 2. 注入：広告抹殺 ＆ 5枚先読みエンジン (完全版)
 // ==========================================
 const INJECT_CODE = `
 <style>
-  /* 既知の広告枠をCSSで即座に消す */
+  /* 広告・不要要素の物理排除 */
   iframe, .pop--excl, .bg-ssp-11557, [id*="bg-ssp"], [class*="ad-"], #toast,
-  [style*="z-index: 2147483647"], [style*="z-index: 9999"] { 
+  [style*="z-index: 2147483647"], [style*="z-index: 9999"], 
+  a[href*="adexchangerapid"], a[href*="university"] { 
     display: none !important; visibility: hidden !important; pointer-events: none !important; 
   }
-  /* 続きを読むボタン等のUIは絶対に消さない */
+  /* UIの保護 */
   #load-more-chapters, .load-more, .read-more { 
     display: block !important; visibility: visible !important; opacity: 1 !important;
+    background: #3b82f6 !important; color: white !important; border-radius: 8px;
   }
 </style>
 <script>
   (function() {
-    // ポップアップを根本から無効化
-    window.open = function() { console.log('Ad-popup blocked'); return null; };
+    // 1. ポップアップ広告を強制無効化
+    window.open = function() { return null; };
 
-    // 【核心】1秒おきに透明な広告板を監視して削除する関数
-    const nukeTransparentAds = () => {
-      // ページ内のすべてのdivとaタグをチェック
-      document.querySelectorAll('div, a, ins, section').forEach(el => {
+    // 2. 【核心】透明ボタン監視・破壊エンジン（1秒おき）
+    const nukeOverlays = () => {
+      document.querySelectorAll('div, a, section, ins').forEach(el => {
         const s = window.getComputedStyle(el);
-        const zIndex = parseInt(s.zIndex);
-        const opacity = parseFloat(s.opacity);
-        
-        // 条件：z-indexが1000以上で、かつ透明に近い要素
-        const isSuspicious = zIndex > 1000 && (opacity < 0.1 || s.backgroundColor.includes('rgba(0, 0, 0, 0)'));
-        
-        if (isSuspicious) {
-          // 漫画のボタン（テキストがあるもの）は除外する安全策
-          if (el.innerText.trim().length === 0) {
-            el.remove();
-            console.log('Nuked a transparent ad overlay');
-          }
-        }
-
-        // adexchangerapidなどの特定ドメインリンクも削除
-        if (el.href && (el.href.includes('adex') || el.href.includes('university'))) {
-          el.remove();
+        const z = parseInt(s.zIndex);
+        // z-indexが高い透明な板、または広告ドメインへのリンクを即削除
+        if ((z > 1000 && parseFloat(s.opacity) < 0.1) || 
+            (el.href && (el.href.includes('adex') || el.href.includes('university')))) {
+          if (!el.innerText.trim()) el.remove();
         }
       });
     };
+    setInterval(nukeOverlays, 1000);
 
-    // 1秒ごとに実行
-    setInterval(nukeTransparentAds, 1000);
-
-    // 画像の5枚先読み（スクロールをスムーズに）
-    const prefetch = () => {
-      const imgs = Array.from(document.querySelectorAll('img[data-src]'));
-      const obs = new IntersectionObserver((entries) => {
+    // 3. 【核心】5枚先読み・スクロール最適化エンジン
+    const initPrefetch = () => {
+      const images = Array.from(document.querySelectorAll('img'));
+      const observer = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
           if (entry.isIntersecting) {
-            const idx = imgs.indexOf(entry.target);
-            for(let i=1; i<=5; i++) if(imgs[idx+i]) imgs[idx+i].src = imgs[idx+i].dataset.src;
+            const index = images.indexOf(entry.target);
+            // 現在の画像から5枚先までを裏で読み込み開始
+            for (let i = 1; i <= 5; i++) {
+              const nextImg = images[index + i];
+              if (nextImg && nextImg.dataset.src && !nextImg.src) {
+                nextImg.src = nextImg.dataset.src;
+                nextImg.removeAttribute('loading'); // 遅延を解除
+              }
+            }
           }
         });
-      }, { rootMargin: '1000px' });
-      imgs.forEach(img => obs.observe(img));
+      }, { rootMargin: '3000px 0px' }); // 1000px先まで検知範囲を広げる
+
+      images.forEach(img => {
+        if (img.dataset.src) observer.observe(img);
+        // 初期表示範囲にある画像は即ロード
+        if (img.getBoundingClientRect().top < window.innerHeight + 1000 && img.dataset.src) {
+          img.src = img.dataset.src;
+        }
+      });
     };
-    document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', prefetch) : prefetch();
+    
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initPrefetch);
+    } else {
+      initPrefetch();
+    }
   })();
 </script>
 `;
 
 // ==========================================
-// 3. 故障検知（Failover）付き取得ロジック
+// 3. 故障検知（Failover）リトライ機能
 // ==========================================
 async function fetchWithRetry(req, targetUrlPath, attempt = 0) {
-    if (attempt >= CF_WORKER_URLS.length) throw new Error("All Workers Failed");
+    if (attempt >= CF_WORKER_URLS.length) throw new Error("All Workers Offline");
 
     const currentWorker = CF_WORKER_URLS[(globalIndex + attempt) % CF_WORKER_URLS.length];
     const targetUrl = currentWorker + targetUrlPath;
@@ -106,13 +113,14 @@ async function fetchWithRetry(req, targetUrlPath, attempt = 0) {
             method: req.method,
             headers: h,
             agent: proxyAgent,
-            compress: true,
+            compress: true, 
             redirect: 'follow',
             body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined,
-            timeout: 12000
+            timeout: 15000 // 1台15秒で見切りをつける
         });
 
         if (response.status === 1101 || response.status >= 500) {
+            console.warn(`[Failover] Worker ${currentWorker} failed. Retrying...`);
             return fetchWithRetry(req, targetUrlPath, attempt + 1);
         }
         return response;
@@ -122,7 +130,7 @@ async function fetchWithRetry(req, targetUrlPath, attempt = 0) {
 }
 
 // ==========================================
-// 4. メインルーティング
+// 4. メインプロキシ
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -131,6 +139,7 @@ app.all('*', async (req, res) => {
         const response = await fetchWithRetry(req, req.url);
         globalIndex = (globalIndex + 1) % CF_WORKER_URLS.length;
 
+        // 不要ヘッダー削除
         response.headers.forEach((v, k) => {
             if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy', 'x-frame-options'].includes(k.toLowerCase())) {
                 res.set(k, v);
@@ -139,29 +148,35 @@ app.all('*', async (req, res) => {
 
         const contentType = response.headers.get("content-type") || "";
 
+        // HTMLの場合：広告削除 ＆ 究極コード注入
         if (contentType.includes("text/html")) {
             let text = await response.text();
             
-            // 物理削除：adexchangerapidとuniversityを消し去る
+            // 物理削除
             text = text.replace(/<script[^>]*universityshocksooner\.com[^>]*><\/script>/gi, "");
+            text = text.replace(/<script[^>]*adexchangerapid\.com[^>]*><\/script>/gi, "");
             text = text.replace(/<a[^>]*adexchangerapid\.com[^>]*>.*?<\/a>/gi, "");
             text = text.split("universityshocksooner.com").join("localhost");
 
-            // 広告抹殺コードを注入
+            // 注入
             text = text.replace('<head>', '<head>' + INJECT_CODE);
 
             res.set("Content-Type", "text/html; charset=utf-8");
             return res.status(response.status).send(text);
         }
 
-        // 画像・アセットはストリーミング
+        // 画像などはキャッシュを効かせてストリーミング
+        if (req.url.includes('_p_') || contentType.includes("image")) {
+            res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+
         res.status(response.status);
         response.body.pipe(res);
 
     } catch (error) {
-        if (!res.headersSent) res.status(502).send("Service Temporarily Unavailable");
+        if (!res.headersSent) res.status(502).send("Proxy Node Error: All backend nodes are down.");
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Super Clean Proxy running on ${PORT}`));
+app.listen(PORT, () => console.log(`Ultimate Manga Engine Online on port ${PORT}`));
