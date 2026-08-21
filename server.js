@@ -2,7 +2,7 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
-const ZstdCodec = require('zstd-codec').ZstdCodec;
+const zstd = require('@mongodb-js/zstd');  // ★ 新しい zstd ライブラリ
 const app = express();
 
 // ==========================================
@@ -118,20 +118,6 @@ const INJECT_CODE = `
 </script>
 `;
 
-// ★ zstd 解凍関数（正しい API を使用）★
-function decompressZstd(buffer) {
-    return new Promise((resolve, reject) => {
-        ZstdCodec.run((zstd) => {
-            try {
-                const result = zstd.decompress(buffer);
-                resolve(Buffer.from(result));
-            } catch (e) {
-                reject(e);
-            }
-        });
-    });
-}
-
 // ==========================================
 // 3. メインプロキシ
 // ==========================================
@@ -186,11 +172,11 @@ app.all('*', async (req, res) => {
             if (contentType.includes("text/html")) {
                 let buffer = await response.buffer();
 
-                // ★ zstd 解凍 ★
+                // ★ zstd を解凍（@mongodb-js/zstd を使用） ★
                 const contentEncoding = response.headers.get('content-encoding');
                 if (contentEncoding && contentEncoding.includes('zstd')) {
                     try {
-                        buffer = await decompressZstd(buffer);
+                        buffer = await zstd.decompress(buffer);
                         console.log('✅ Manually decompressed zstd');
                     } catch (e) {
                         console.warn('⚠️ zstd decompression failed:', e.message);
