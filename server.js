@@ -138,12 +138,12 @@ app.all('*', async (req, res) => {
         headers['X-Forwarded-Proto'] = 'https';
 
         try {
-            // ★ compress: true（デフォルト）に修正 ★
+            // ★ compress オプションを削除（デフォルトの true が有効） ★
             const response = await fetch(targetUrl, {
                 method: req.method,
                 headers: headers,
                 agent: proxyAgent,
-                // compress: true,   // デフォルトなので指定しなくてOK
+                // compress: true,   // デフォルトなので指定不要
                 redirect: 'follow',
                 timeout: 12000,
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
@@ -168,23 +168,22 @@ app.all('*', async (req, res) => {
 
             // --- HTMLの場合 ---
             if (contentType.includes("text/html")) {
-                // ★ 解凍済みのバッファを取得（compress:true のおかげでgzipは自動解除）★
+                // ★ 自動的に gzip 解凍されたバッファを取得 ★
                 const buffer = await response.buffer();
 
-                // ★ ヘッダーからcharsetを取得（なければutf-8）★
+                // ヘッダーからcharsetを取得（なければutf-8）
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
                 if (charsetMatch) {
                     charset = charsetMatch[1].toLowerCase();
                 } else {
-                    // ヘッダーにcharsetがない場合はShift-JISを試す
                     charset = 'shift_jis';
                 }
 
-                // ★ 指定charsetでデコード ★
+                // 指定charsetでデコード
                 let text = iconv.decode(buffer, charset);
 
-                // ★ UTF-8でデコードして文字化けの兆候があればShift-JISで再試行 ★
+                // UTF-8でデコードして文字化けの兆候があればShift-JISで再試行
                 if (charset === 'utf-8' && /[\uFFFD�]/.test(text)) {
                     console.warn('⚠️ UTF-8 decode appears broken, retrying with Shift-JIS');
                     text = iconv.decode(buffer, 'shift_jis');
