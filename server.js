@@ -2,7 +2,7 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
-const zstd = require('zstd-codec').ZstdCodec;  // zstd ライブラリ
+const ZstdCodec = require('zstd-codec').ZstdCodec;  // 正しいインポート
 const app = express();
 
 // ==========================================
@@ -118,6 +118,20 @@ const INJECT_CODE = `
 </script>
 `;
 
+// ★ zstd 解凍関数（正しい使い方）★
+function decompressZstd(buffer) {
+    return new Promise((resolve, reject) => {
+        ZstdCodec.run((codec) => {
+            try {
+                const result = codec.decompress(buffer);
+                resolve(Buffer.from(result));
+            } catch (e) {
+                reject(e);
+            }
+        });
+    });
+}
+
 // ==========================================
 // 3. メインプロキシ
 // ==========================================
@@ -172,23 +186,11 @@ app.all('*', async (req, res) => {
             if (contentType.includes("text/html")) {
                 let buffer = await response.buffer();
 
-                // ★ zstd 解凍処理 ★
+                // ★ zstd 解凍 ★
                 const contentEncoding = response.headers.get('content-encoding');
                 if (contentEncoding && contentEncoding.includes('zstd')) {
                     try {
-                        // zstd-codec は非同期初期化が必要
-                        const decoded = await new Promise((resolve, reject) => {
-                            zstd.simple((err, codec) => {
-                                if (err) return reject(err);
-                                try {
-                                    const result = codec.decompress(buffer);
-                                    resolve(Buffer.from(result));
-                                } catch (e) {
-                                    reject(e);
-                                }
-                            });
-                        });
-                        buffer = decoded;
+                        buffer = await decompressZstd(buffer);
                         console.log('✅ Manually decompressed zstd');
                     } catch (e) {
                         console.warn('⚠️ zstd decompression failed:', e.message);
