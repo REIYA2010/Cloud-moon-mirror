@@ -2,7 +2,7 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
-const zstd = require('@mongodb-js/zstd');  // ★ 新しい zstd ライブラリ
+const zstd = require('@mongodb-js/zstd');
 const app = express();
 
 // ==========================================
@@ -119,7 +119,7 @@ const INJECT_CODE = `
 `;
 
 // ==========================================
-// 3. メインプロキシ
+// 3. メインプロキシ（全リソースで zstd 解凍対応）
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -160,6 +160,7 @@ app.all('*', async (req, res) => {
 
             markWorkerSuccess(worker);
 
+            // レスポンスヘッダーの転送（Content-Encoding は後で上書き）
             response.headers.forEach((v, k) => {
                 if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy'].includes(k.toLowerCase())) {
                     res.set(k, v);
@@ -167,23 +168,23 @@ app.all('*', async (req, res) => {
             });
 
             const contentType = response.headers.get("content-type") || "";
+            let buffer = await response.buffer();
 
-            // --- HTMLの場合（zstd 対応） ---
-            if (contentType.includes("text/html")) {
-                let buffer = await response.buffer();
-
-                // ★ zstd を解凍（@mongodb-js/zstd を使用） ★
-                const contentEncoding = response.headers.get('content-encoding');
-                if (contentEncoding && contentEncoding.includes('zstd')) {
-                    try {
-                        buffer = await zstd.decompress(buffer);
-                        console.log('✅ Manually decompressed zstd');
-                    } catch (e) {
-                        console.warn('⚠️ zstd decompression failed:', e.message);
-                    }
+            // ★ zstd 圧縮されていたら解凍（全リソース対象） ★
+            const contentEncoding = response.headers.get('content-encoding');
+            if (contentEncoding && contentEncoding.includes('zstd')) {
+                try {
+                    buffer = await zstd.decompress(buffer);
+                    console.log(`✅ Decompressed zstd: ${req.url}`);
+                    // 解凍したので Content-Encoding ヘッダーは削除（または identity に）
+                    res.removeHeader('content-encoding');
+                } catch (e) {
+                    console.warn(`⚠️ zstd decompression failed for ${req.url}:`, e.message);
                 }
+            }
 
-                // charset を取得
+            // --- HTML の場合：広告ブロックを注入 ---
+            if (contentType.includes("text/html")) {
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
                 if (charsetMatch) {
@@ -205,12 +206,23 @@ app.all('*', async (req, res) => {
                 return res.status(response.status).send(text);
             }
 
-            // --- 画像・JS・CSS ---
-            if (req.url.includes('_p_')) {
-                res.set('Cache-Control', 'public, max-age=31536000, immutable');
+            // --- 画像・CSS・JS など（バイナリまたはテキスト） ---
+            // 画像（png/jpg/webp など）は Buffer をそのまま送信
+            if (contentType.includes('image') || contentType.includes('font') || contentType.includes('application/octet-stream')) {
+                res.set('Content-Type', contentType);
+                return res.status(response.status).send(buffer);
             }
-            res.status(response.status);
-            return response.body.pipe(res);
+
+            // CSS / JavaScript などのテキスト系は UTF-8 として送信
+            if (contentType.includes('text') || contentType.includes('javascript') || contentType.includes('json')) {
+                const text = buffer.toString('utf-8');
+                res.set('Content-Type', contentType);
+                return res.status(response.status).send(text);
+            }
+
+            // その他（デフォルト）
+            res.set('Content-Type', contentType);
+            return res.status(response.status).send(buffer);
 
         } catch (error) {
             console.error(`Attempt ${attempt} failed on [${worker.url}]:`, error.message);
