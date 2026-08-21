@@ -73,71 +73,45 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 画像プロキシエンドポイント
+// 2. 画像プロキシエンドポイント（残しておくが、直接使われない）
 // ==========================================
 app.get('/proxy', async (req, res) => {
     const rawUrl = req.query.url;
     if (!rawUrl) {
         return res.status(400).send('Missing url parameter');
     }
-
     let url = decodeURIComponent(rawUrl);
-
-    if (url.includes('cdn.mangaraw123.com')) {
-        const fileMatch = url.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
-        if (fileMatch) {
-            const fileName = fileMatch[1];
-            const worker = getActiveWorker();
-            const workerUrl = worker.url + '/_img_proxy/_cdn.mangaraw123.com/covers/' + fileName;
-            console.log(`🖼️ Fetching via Worker: ${workerUrl}`);
-            try {
-                const response = await fetch(workerUrl, {
-                    agent: proxyAgent,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    },
-                    timeout: 15000
-                });
-                if (!response.ok) {
-                    console.warn(`⚠️ Worker fetch failed: ${response.status} for ${workerUrl}`);
-                    return res.status(response.status).send('Failed to fetch image');
-                }
-                const buffer = await response.buffer();
-                const contentType = response.headers.get('content-type') || 'image/jpeg';
-                res.set('Content-Type', contentType);
-                res.set('Cache-Control', 'public, max-age=86400');
-                return res.send(buffer);
-            } catch (e) {
-                console.error(`Worker proxy error for ${workerUrl}:`, e.message);
-                return res.status(500).send('Failed to fetch image');
+    // ファイル名を抽出して Worker 経由で取得
+    const fileMatch = url.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+    if (fileMatch) {
+        const fileName = fileMatch[1];
+        const worker = getActiveWorker();
+        const workerUrl = worker.url + '/_img_proxy/_cdn.mangaraw123.com/covers/' + fileName;
+        console.log(`🖼️ Proxy fallback: ${workerUrl}`);
+        try {
+            const response = await fetch(workerUrl, {
+                agent: proxyAgent,
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 15000
+            });
+            if (!response.ok) {
+                return res.status(response.status).send('Failed to fetch image');
             }
+            const buffer = await response.buffer();
+            const contentType = response.headers.get('content-type') || 'image/jpeg';
+            res.set('Content-Type', contentType);
+            res.set('Cache-Control', 'public, max-age=86400');
+            return res.send(buffer);
+        } catch (e) {
+            console.error(`Proxy error: ${e.message}`);
+            return res.status(500).send('Failed to fetch image');
         }
     }
-
-    try {
-        const response = await fetch(url, {
-            agent: proxyAgent,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 15000
-        });
-        if (!response.ok) {
-            return res.status(response.status).send('Failed to fetch image');
-        }
-        const buffer = await response.buffer();
-        const contentType = response.headers.get('content-type') || 'image/jpeg';
-        res.set('Content-Type', contentType);
-        res.set('Cache-Control', 'public, max-age=86400');
-        res.send(buffer);
-    } catch (e) {
-        console.error(`Proxy error for ${url}:`, e.message);
-        res.status(500).send('Failed to fetch image');
-    }
+    res.status(400).send('Invalid image URL');
 });
 
 // ==========================================
-// 3. 広告ブロック用
+// 3. 広告ブロック用（簡素化）
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -248,40 +222,65 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // ★★★ 画像URLを強制書き換え（絶対URL + 相対パス） ★★★
+                // ★★★ 画像URLを確実に Worker パスに書き換える（最終処理） ★★★
 
-                // 1. _img_proxy/_cdn.mangaraw123.com/covers/xxx.jpg を /proxy?url=... に変換（Worker経由）
-                text = text.replace(/_img_proxy\/_cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
-                    const proxyUrl = `/proxy?url=${encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName)}`;
-                    console.log(`🔵 Server rewrote Worker path: ${fileName} -> ${proxyUrl}`);
-                    return proxyUrl;
-                });
-
-                // 2. src="https://cdn.mangaraw123.com/covers/xxx.jpg" を変換
-                text = text.replace(/src="https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"]+)"/g, (match, fileName) => {
-                    const proxyUrl = `/proxy?url=${encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName)}`;
-                    return `src="${proxyUrl}"`;
-                });
-
-                // 3. ★★★ 相対パスの画像（例：src="rimo-torabuho-ru.jpg"）を Worker 経由に変換 ★★★
-                text = text.replace(/<img([^>]*)src="([^"/\\s]+\.(jpg|jpeg|png|webp|gif|bmp|svg))"([^>]*)>/gi, (match, before, fileName, ext, after) => {
-                    // 既にプロキシ経由や絶対URL、data:スキームの場合はスキップ
-                    if (fileName.startsWith('/') || fileName.startsWith('http') || fileName.startsWith('data:')) return match;
-                    // すでに変換済みの場合はスキップ
-                    if (before.includes('/proxy') || after.includes('/proxy')) return match;
+                // 1. 既存の Worker パス（_img_proxy_ または _img_proxy）を正規化
+                text = text.replace(/_img_proxy_?\/_?cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
                     const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
-                    console.log(`🔵 Server rewrote relative image: ${fileName} -> ${workerPath}`);
+                    console.log(`🔵 Normalized Worker path: ${fileName}`);
+                    return workerPath;
+                });
+
+                // 2. 絶対URL（https://cdn.mangaraw123.com/covers/xxx.jpg）を Worker パスに
+                text = text.replace(/src="https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"]+)"/g, (match, fileName) => {
+                    const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
+                    console.log(`🔵 Absolute URL -> Worker: ${fileName}`);
+                    return `src="${workerPath}"`;
+                });
+
+                // 3. 相対パス（src="filename.jpg"）を Worker パスに
+                text = text.replace(/<img([^>]*)src="([^"/\\s]+\.(jpg|jpeg|png|webp|gif|bmp|svg))"([^>]*)>/gi, (match, before, fileName, after) => {
+                    // すでに Worker パス or 絶対URL の場合はスキップ
+                    if (before.includes('/_img_proxy') || after.includes('/_img_proxy') || fileName.startsWith('/') || fileName.startsWith('http')) return match;
+                    const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
+                    console.log(`🔵 Relative src -> Worker: ${fileName}`);
                     return `<img${before}src="${workerPath}"${after}>`;
                 });
 
-                // 4. data-src の相対パスも変換
-                text = text.replace(/<img([^>]*)data-src="([^"/\\s]+\.(jpg|jpeg|png|webp|gif|bmp|svg))"([^>]*)>/gi, (match, before, fileName, ext, after) => {
-                    if (fileName.startsWith('/') || fileName.startsWith('http') || fileName.startsWith('data:')) return match;
-                    if (before.includes('/proxy') || after.includes('/proxy')) return match;
-                    const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
-                    return `<img${before}data-src="${workerPath}"${after}>`;
+                // 4. data-src の処理（カンマ区切り対応）
+                text = text.replace(/data-src="([^"]+)"/gi, (match, value) => {
+                    // カンマ区切りを処理
+                    let fileName = null;
+                    if (value.includes(',')) {
+                        const parts = value.split(',').map(s => s.trim());
+                        for (let part of parts) {
+                            const m = part.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                            if (m) { fileName = m[1]; break; }
+                        }
+                        if (!fileName) {
+                            // 最初の部分から抽出
+                            const m = parts[0].match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                            if (m) fileName = m[1];
+                        }
+                    } else {
+                        const m = value.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                        if (m) fileName = m[1];
+                    }
+                    if (fileName) {
+                        // すでに Worker パスでない場合のみ変換
+                        if (!value.includes('/_img_proxy')) {
+                            const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
+                            console.log(`🔵 data-src (${fileName}) -> Worker`);
+                            return `data-src="${workerPath}"`;
+                        }
+                    }
+                    return match;
                 });
 
+                // 5. 最後に、まだ残っている _img_proxy_ (二重アンダースコア) を正規化
+                text = text.replace(/_img_proxy_\/cdn\.mangaraw123\.com\/covers\//g, '/_img_proxy/_cdn.mangaraw123.com/covers/');
+
+                // 広告ブロックを注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
                 return res.status(response.status).send(text);
