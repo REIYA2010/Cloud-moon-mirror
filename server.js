@@ -73,7 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 画像プロキシエンドポイント
+// 2. 画像プロキシエンドポイント（修正版）
 // ==========================================
 app.get('/proxy', async (req, res) => {
     const rawUrl = req.query.url;
@@ -83,13 +83,13 @@ app.get('/proxy', async (req, res) => {
 
     let url = decodeURIComponent(rawUrl);
 
-    // ★ cdn.mangaraw123.com へのリクエストは Worker 経由で取得 ★
+    // ★ 修正：パスを _img_proxy/_cdn.mangaraw123.com に変更 ★
     if (url.includes('cdn.mangaraw123.com')) {
         const fileMatch = url.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
         if (fileMatch) {
             const fileName = fileMatch[1];
             const worker = getActiveWorker();
-            const workerUrl = worker.url + '/_img_proxy_/cdn.mangaraw123.com/covers/' + fileName;
+            const workerUrl = worker.url + '/_img_proxy/_cdn.mangaraw123.com/covers/' + fileName;
             console.log(`🖼️ Fetching via Worker: ${workerUrl}`);
             try {
                 const response = await fetch(workerUrl, {
@@ -170,7 +170,7 @@ const INJECT_CODE = `
 `;
 
 // ==========================================
-// 4. メインプロキシ（画像URLをサーバー側で書き換え）
+// 4. メインプロキシ（修正版）
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -249,21 +249,18 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // ★★★ サーバー側で画像URLを強制書き換え（これが最重要） ★★★
-                // 1. _img_proxy_/cdn.mangaraw123.com/covers/xxx.jpg を /proxy?url=... に変換
-                text = text.replace(/_img_proxy_\/cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
+                // ★★★ 修正：パスを _img_proxy/_cdn.mangaraw123.com に変更 ★★★
+                text = text.replace(/_img_proxy\/_cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
                     const proxyUrl = `/proxy?url=${encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName)}`;
                     console.log(`🔵 Server rewrote image: ${fileName} -> ${proxyUrl}`);
                     return proxyUrl;
                 });
 
-                // 2. src="https://cdn.mangaraw123.com/..." も変換
                 text = text.replace(/src="https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"]+)"/g, (match, fileName) => {
                     const proxyUrl = `/proxy?url=${encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName)}`;
                     return `src="${proxyUrl}"`;
                 });
 
-                // 3. data-src も同様に変換
                 text = text.replace(/data-src="https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"]+)"/g, (match, fileName) => {
                     const proxyUrl = `/proxy?url=${encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName)}`;
                     return `data-src="${proxyUrl}"`;
