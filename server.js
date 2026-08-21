@@ -73,45 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 画像プロキシエンドポイント（残しておくが、直接使われない）
-// ==========================================
-app.get('/proxy', async (req, res) => {
-    const rawUrl = req.query.url;
-    if (!rawUrl) {
-        return res.status(400).send('Missing url parameter');
-    }
-    let url = decodeURIComponent(rawUrl);
-    // ファイル名を抽出して Worker 経由で取得
-    const fileMatch = url.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
-    if (fileMatch) {
-        const fileName = fileMatch[1];
-        const worker = getActiveWorker();
-        const workerUrl = worker.url + '/_img_proxy/_cdn.mangaraw123.com/covers/' + fileName;
-        console.log(`🖼️ Proxy fallback: ${workerUrl}`);
-        try {
-            const response = await fetch(workerUrl, {
-                agent: proxyAgent,
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                timeout: 15000
-            });
-            if (!response.ok) {
-                return res.status(response.status).send('Failed to fetch image');
-            }
-            const buffer = await response.buffer();
-            const contentType = response.headers.get('content-type') || 'image/jpeg';
-            res.set('Content-Type', contentType);
-            res.set('Cache-Control', 'public, max-age=86400');
-            return res.send(buffer);
-        } catch (e) {
-            console.error(`Proxy error: ${e.message}`);
-            return res.status(500).send('Failed to fetch image');
-        }
-    }
-    res.status(400).send('Invalid image URL');
-});
-
-// ==========================================
-// 3. 広告ブロック用（簡素化）
+// 2. 広告ブロック用（簡素化）
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -137,17 +99,15 @@ const INJECT_CODE = `
       });
     };
     setInterval(nuke, 2000);
-    console.log('🟢 Ad-block script injected');
   })();
 </script>
 `;
 
 // ==========================================
-// 4. メインプロキシ
+// 3. メインプロキシ
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
-    if (req.url.startsWith('/proxy')) return;
 
     const maxRetries = workers.length;
     let attempt = 0;
@@ -222,65 +182,57 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // ★★★ 画像URLを確実に Worker パスに書き換える（最終処理） ★★★
+                // ★★★ 決定的な画像URL書き換え（すべてを Worker パスに統一） ★★★
 
-                // 1. 既存の Worker パス（_img_proxy_ または _img_proxy）を正規化
-                text = text.replace(/_img_proxy_?\/_?cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
-                    const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
-                    console.log(`🔵 Normalized Worker path: ${fileName}`);
-                    return workerPath;
-                });
-
-                // 2. 絶対URL（https://cdn.mangaraw123.com/covers/xxx.jpg）を Worker パスに
-                text = text.replace(/src="https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"]+)"/g, (match, fileName) => {
-                    const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
-                    console.log(`🔵 Absolute URL -> Worker: ${fileName}`);
-                    return `src="${workerPath}"`;
-                });
-
-                // 3. 相対パス（src="filename.jpg"）を Worker パスに
-                text = text.replace(/<img([^>]*)src="([^"/\\s]+\.(jpg|jpeg|png|webp|gif|bmp|svg))"([^>]*)>/gi, (match, before, fileName, after) => {
-                    // すでに Worker パス or 絶対URL の場合はスキップ
-                    if (before.includes('/_img_proxy') || after.includes('/_img_proxy') || fileName.startsWith('/') || fileName.startsWith('http')) return match;
-                    const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
-                    console.log(`🔵 Relative src -> Worker: ${fileName}`);
-                    return `<img${before}src="${workerPath}"${after}>`;
-                });
-
-                // 4. data-src の処理（カンマ区切り対応）
-                text = text.replace(/data-src="([^"]+)"/gi, (match, value) => {
-                    // カンマ区切りを処理
-                    let fileName = null;
-                    if (value.includes(',')) {
-                        const parts = value.split(',').map(s => s.trim());
-                        for (let part of parts) {
-                            const m = part.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
-                            if (m) { fileName = m[1]; break; }
-                        }
-                        if (!fileName) {
-                            // 最初の部分から抽出
-                            const m = parts[0].match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
-                            if (m) fileName = m[1];
-                        }
-                    } else {
-                        const m = value.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
-                        if (m) fileName = m[1];
+                // ヘルパー関数：URL からファイル名を抽出
+                function extractFileName(url) {
+                    if (!url) return null;
+                    // カンマ区切りなら最初の部分を試す
+                    let parts = url.split(',').map(s => s.trim());
+                    for (let part of parts) {
+                        // ファイル名パターン（拡張子付き）
+                        const match = part.match(/([^\/\\s"']+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                        if (match) return match[1];
                     }
+                    // 直接ファイル名を探す
+                    const match = url.match(/([^\/\\s"']+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                    return match ? match[1] : null;
+                }
+
+                // 1. src 属性（絶対URL、相対パス、Workerパスすべて）を Worker パスに強制変換
+                text = text.replace(/<img([^>]*)src=["']([^"']*)["']([^>]*)>/gi, (match, before, srcVal, after) => {
+                    // 既に正しい Worker パスならそのまま
+                    if (srcVal.startsWith('/_img_proxy/_cdn.mangaraw123.com/covers/')) return match;
+                    // ファイル名を抽出
+                    const fileName = extractFileName(srcVal);
                     if (fileName) {
-                        // すでに Worker パスでない場合のみ変換
-                        if (!value.includes('/_img_proxy')) {
-                            const workerPath = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
-                            console.log(`🔵 data-src (${fileName}) -> Worker`);
-                            return `data-src="${workerPath}"`;
-                        }
+                        const newSrc = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
+                        console.log(`🔵 src rewrite: ${srcVal} -> ${newSrc}`);
+                        return `<img${before}src="${newSrc}"${after}>`;
                     }
                     return match;
                 });
 
-                // 5. 最後に、まだ残っている _img_proxy_ (二重アンダースコア) を正規化
-                text = text.replace(/_img_proxy_\/cdn\.mangaraw123\.com\/covers\//g, '/_img_proxy/_cdn.mangaraw123.com/covers/');
+                // 2. data-src 属性（Lazy Load）も同様に変換
+                text = text.replace(/<img([^>]*)data-src=["']([^"']*)["']([^>]*)>/gi, (match, before, dataVal, after) => {
+                    if (dataVal.startsWith('/_img_proxy/_cdn.mangaraw123.com/covers/')) return match;
+                    const fileName = extractFileName(dataVal);
+                    if (fileName) {
+                        const newSrc = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
+                        console.log(`🔵 data-src rewrite: ${dataVal} -> ${newSrc}`);
+                        return `<img${before}data-src="${newSrc}"${after}>`;
+                    }
+                    return match;
+                });
 
-                // 広告ブロックを注入
+                // 3. 既存の不正な Worker パス（_img_proxy_ など）を正規化
+                text = text.replace(/_img_proxy_?\/_?cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
+                    const newSrc = `/_img_proxy/_cdn.mangaraw123.com/covers/${fileName}`;
+                    console.log(`🔵 Normalize worker path: ${match} -> ${newSrc}`);
+                    return newSrc;
+                });
+
+                // 広告ブロック注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
                 return res.status(response.status).send(text);
