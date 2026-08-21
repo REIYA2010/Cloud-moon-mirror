@@ -2,14 +2,14 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
+const zstd = require('zstd-codec').ZstdCodec;  // zstd ライブラリ
 const app = express();
 
 // ==========================================
 // 1. 設定：Cloudflare Workers クラスター
 // ==========================================
 const WORKER_CONFIGS = [
-    // ★ zstd を返す Worker をコメントアウト ★
-    // "https://api-nemu.myproxy0108.workers.dev",
+    "https://api-nemu.myproxy0108.workers.dev",
     "https://mangarw-api.72016.workers.dev",
     "https://tuneninemui.nemu0001.workers.dev"
 ];
@@ -168,10 +168,34 @@ app.all('*', async (req, res) => {
 
             const contentType = response.headers.get("content-type") || "";
 
-            // --- HTMLの場合 ---
+            // --- HTMLの場合（zstd 対応） ---
             if (contentType.includes("text/html")) {
-                const buffer = await response.buffer();
+                let buffer = await response.buffer();
 
+                // ★ zstd 解凍処理 ★
+                const contentEncoding = response.headers.get('content-encoding');
+                if (contentEncoding && contentEncoding.includes('zstd')) {
+                    try {
+                        // zstd-codec は非同期初期化が必要
+                        const decoded = await new Promise((resolve, reject) => {
+                            zstd.simple((err, codec) => {
+                                if (err) return reject(err);
+                                try {
+                                    const result = codec.decompress(buffer);
+                                    resolve(Buffer.from(result));
+                                } catch (e) {
+                                    reject(e);
+                                }
+                            });
+                        });
+                        buffer = decoded;
+                        console.log('✅ Manually decompressed zstd');
+                    } catch (e) {
+                        console.warn('⚠️ zstd decompression failed:', e.message);
+                    }
+                }
+
+                // charset を取得
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
                 if (charsetMatch) {
