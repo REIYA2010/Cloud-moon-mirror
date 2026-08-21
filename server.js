@@ -73,13 +73,25 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 画像プロキシエンドポイント（新規追加）
+// 2. 画像プロキシエンドポイント（修正）
 // ==========================================
 app.get('/proxy', async (req, res) => {
-    const url = req.query.url;
-    if (!url) {
+    const rawUrl = req.query.url;
+    if (!rawUrl) {
         return res.status(400).send('Missing url parameter');
     }
+
+    // URLをデコード（二重エンコードに対応）
+    let url = decodeURIComponent(rawUrl);
+    // もし _img_proxy_ が含まれていたら、正しいURLを抽出
+    if (url.includes('_img_proxy_')) {
+        const match = url.match(/https?:\/\/[^\/]+\.com[^"']+/);
+        if (match) {
+            url = match[0];
+        }
+    }
+
+    console.log(`🖼️ Proxy fetching: ${url}`);
 
     try {
         const response = await fetch(url, {
@@ -89,6 +101,11 @@ app.get('/proxy', async (req, res) => {
             },
             timeout: 15000
         });
+
+        if (!response.ok) {
+            console.warn(`⚠️ Proxy fetch failed: ${response.status} for ${url}`);
+            return res.status(response.status).send('Failed to fetch image');
+        }
 
         const buffer = await response.buffer();
         const contentType = response.headers.get('content-type') || 'image/jpeg';
@@ -102,7 +119,7 @@ app.get('/proxy', async (req, res) => {
 });
 
 // ==========================================
-// 3. 広告ブロック用 ＋ 画像強制読み込み
+// 3. 広告ブロック用 ＋ 画像強制読み込み（修正版）
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -134,24 +151,27 @@ const INJECT_CODE = `
       try {
         const images = document.querySelectorAll('img');
         images.forEach(img => {
+          // 既にプロキシ経由の画像はスキップ
+          if (img.src && img.src.startsWith('/proxy')) return;
+
+          // 既に読み込み完了済みの画像もスキップ
           if (img.complete && img.naturalWidth > 0) return;
 
-          // 既にプロキシ経由ならスキップ
-          if (img.src && img.src.includes('/proxy?url=')) return;
-
+          // 1. data-src / data-lazy / data-original から取得
           const dataSrc = img.getAttribute('data-src') || 
                           img.getAttribute('data-lazy') || 
                           img.getAttribute('data-original');
-          if (dataSrc && !img.src) {
+          if (dataSrc) {
             img.src = '/proxy?url=' + encodeURIComponent(dataSrc);
             console.log('🔵 Loaded from data attribute:', dataSrc);
             return;
           }
 
+          // 2. lazy: 属性からURLを抽出
           for (let attr of img.attributes) {
             if (attr.name.startsWith('lazy:')) {
               const urlMatch = attr.value.match(/(https?:\\/\\/[^\\s"']+)/);
-              if (urlMatch && !img.src) {
+              if (urlMatch) {
                 img.src = '/proxy?url=' + encodeURIComponent(urlMatch[1]);
                 console.log('🔵 Loaded from lazy attribute:', urlMatch[1]);
                 return;
@@ -159,19 +179,21 @@ const INJECT_CODE = `
             }
           }
 
+          // 3. srcset から取得（srcが空の場合）
           if (!img.src && img.srcset) {
             const firstSrc = img.srcset.split(',')[0].trim().split(' ')[0];
-            if (firstSrc && !firstSrc.includes('/proxy?url=')) {
+            if (firstSrc) {
               img.src = '/proxy?url=' + encodeURIComponent(firstSrc);
               console.log('🔵 Loaded from srcset:', firstSrc);
               return;
             }
           }
 
-          // 既存のsrcが絶対URLならプロキシ経由に書き換え
-          if (img.src && img.src.startsWith('http') && !img.src.includes('/proxy?url=')) {
-            img.src = '/proxy?url=' + encodeURIComponent(img.src);
-            console.log('🔵 Rewrote absolute URL to proxy:', img.src);
+          // 4. 既存のsrcが絶対URLならプロキシ経由に書き換え
+          if (img.src && img.src.startsWith('http') && !img.src.startsWith('/proxy')) {
+            const originalSrc = img.src;
+            img.src = '/proxy?url=' + encodeURIComponent(originalSrc);
+            console.log('🔵 Rewrote absolute URL to proxy:', originalSrc);
           }
         });
       } catch(e) {
@@ -212,6 +234,7 @@ const INJECT_CODE = `
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
+    if (req.url.startsWith('/proxy')) return; // プロキシエンドポイントは別途処理済み
 
     const maxRetries = workers.length;
     let attempt = 0;
@@ -286,7 +309,7 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // ★★★ 画像URLをプロキシ経由に書き換え（HTML内の絶対URLを変換） ★★★
+                // HTML内の画像URLをプロキシ経由に書き換え（絶対URLのみ）
                 text = text.replace(/src="(https?:\/\/[^"]+)"/g, (match, url) => {
                     if (url.includes(req.get('host'))) return match;
                     return `src="/proxy?url=${encodeURIComponent(url)}"`;
