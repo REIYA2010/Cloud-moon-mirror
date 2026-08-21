@@ -73,7 +73,36 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 広告ブロック用 ＋ 画像強制読み込み（修正版）
+// 2. 画像プロキシエンドポイント（新規追加）
+// ==========================================
+app.get('/proxy', async (req, res) => {
+    const url = req.query.url;
+    if (!url) {
+        return res.status(400).send('Missing url parameter');
+    }
+
+    try {
+        const response = await fetch(url, {
+            agent: proxyAgent,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 15000
+        });
+
+        const buffer = await response.buffer();
+        const contentType = response.headers.get('content-type') || 'image/jpeg';
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'public, max-age=86400');
+        res.send(buffer);
+    } catch (e) {
+        console.error(`Proxy error for ${url}:`, e.message);
+        res.status(500).send('Failed to fetch image');
+    }
+});
+
+// ==========================================
+// 3. 広告ブロック用 ＋ 画像強制読み込み
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -88,10 +117,8 @@ const INJECT_CODE = `
 </style>
 <script>
   (function() {
-    // 1. ポップアップを殺す
     window.open = function() { return null; };
 
-    // 2. 動的な透明オーバーレイを監視して削除
     const nuke = () => {
       document.querySelectorAll('div, a').forEach(el => {
         const s = window.getComputedStyle(el);
@@ -103,68 +130,48 @@ const INJECT_CODE = `
     };
     setInterval(nuke, 2000);
 
-    // ★★★ 画像を強制的に読み込む（エラー対策版） ★★★
     function forceLoadImages() {
       try {
         const images = document.querySelectorAll('img');
         images.forEach(img => {
-          // すでに読み込まれている場合はスキップ
           if (img.complete && img.naturalWidth > 0) return;
 
-          // data-src / data-lazy / data-original から取得
+          // 既にプロキシ経由ならスキップ
+          if (img.src && img.src.includes('/proxy?url=')) return;
+
           const dataSrc = img.getAttribute('data-src') || 
                           img.getAttribute('data-lazy') || 
                           img.getAttribute('data-original');
           if (dataSrc && !img.src) {
-            // URLエンコード処理（日本語ファイル名対策）
-            try {
-              const url = new URL(dataSrc, window.location.origin);
-              img.src = url.toString();
-            } catch {
-              img.src = dataSrc;
-            }
-            console.log('🔵 Loaded image from data attribute:', img.src);
+            img.src = '/proxy?url=' + encodeURIComponent(dataSrc);
+            console.log('🔵 Loaded from data attribute:', dataSrc);
             return;
           }
 
-          // lazy: 属性からURLを抽出
           for (let attr of img.attributes) {
             if (attr.name.startsWith('lazy:')) {
               const urlMatch = attr.value.match(/(https?:\\/\\/[^\\s"']+)/);
               if (urlMatch && !img.src) {
-                img.src = urlMatch[1];
-                console.log('🔵 Loaded image from lazy attribute:', img.src);
+                img.src = '/proxy?url=' + encodeURIComponent(urlMatch[1]);
+                console.log('🔵 Loaded from lazy attribute:', urlMatch[1]);
                 return;
               }
             }
           }
 
-          // 背景画像を src として設定
-          if (!img.src) {
-            const style = img.getAttribute('style') || '';
-            const bgMatch = style.match(/url\\(['"]?([^'")]+)['"]?\\)/);
-            if (bgMatch) {
-              img.src = bgMatch[1];
-              console.log('🔵 Loaded image from background-image:', img.src);
+          if (!img.src && img.srcset) {
+            const firstSrc = img.srcset.split(',')[0].trim().split(' ')[0];
+            if (firstSrc && !firstSrc.includes('/proxy?url=')) {
+              img.src = '/proxy?url=' + encodeURIComponent(firstSrc);
+              console.log('🔵 Loaded from srcset:', firstSrc);
               return;
             }
           }
 
-          // src が空で、srcset だけがある場合
-          if (!img.src && img.srcset) {
-            const firstSrc = img.srcset.split(',')[0].trim().split(' ')[0];
-            if (firstSrc) {
-              img.src = firstSrc;
-              console.log('🔵 Loaded image from srcset:', img.src);
-            }
-          }
-        });
-
-        // picture > source タグ対応
-        document.querySelectorAll('source[data-srcset]').forEach(source => {
-          const dataSrcset = source.getAttribute('data-srcset');
-          if (dataSrcset) {
-            source.srcset = dataSrcset;
+          // 既存のsrcが絶対URLならプロキシ経由に書き換え
+          if (img.src && img.src.startsWith('http') && !img.src.includes('/proxy?url=')) {
+            img.src = '/proxy?url=' + encodeURIComponent(img.src);
+            console.log('🔵 Rewrote absolute URL to proxy:', img.src);
           }
         });
       } catch(e) {
@@ -172,48 +179,36 @@ const INJECT_CODE = `
       }
     }
 
-    // DOM読み込み時に実行（遅延させて確実に）
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        setTimeout(forceLoadImages, 500);
-      });
+      document.addEventListener('DOMContentLoaded', () => setTimeout(forceLoadImages, 500));
     } else {
       setTimeout(forceLoadImages, 500);
     }
 
-    // MutationObserver（エラー対策：bodyが存在する場合のみ）
     try {
       if (document.body) {
-        const observer = new MutationObserver(() => {
-          setTimeout(forceLoadImages, 300);
-        });
-        observer.observe(document.body, {
-          childList: true,
-          subtree: true
-        });
+        const observer = new MutationObserver(() => setTimeout(forceLoadImages, 300));
+        observer.observe(document.body, { childList: true, subtree: true });
         console.log('🟢 MutationObserver started');
       }
     } catch(e) {
       console.warn('⚠️ MutationObserver setup failed:', e.message);
     }
 
-    // スクロール時にも再実行
     let scrollTimer;
     window.addEventListener('scroll', () => {
       clearTimeout(scrollTimer);
       scrollTimer = setTimeout(forceLoadImages, 400);
     });
 
-    // 定期的に再実行（保険）
     setInterval(forceLoadImages, 5000);
-
-    console.log('🟢 Image force-load script injected successfully');
+    console.log('🟢 Image force-load script injected');
   })();
 </script>
 `;
 
 // ==========================================
-// 3. メインプロキシ
+// 4. メインプロキシ
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -290,6 +285,16 @@ app.all('*', async (req, res) => {
                     text = iconv.decode(buffer, 'shift_jis');
                     charset = 'shift_jis';
                 }
+
+                // ★★★ 画像URLをプロキシ経由に書き換え（HTML内の絶対URLを変換） ★★★
+                text = text.replace(/src="(https?:\/\/[^"]+)"/g, (match, url) => {
+                    if (url.includes(req.get('host'))) return match;
+                    return `src="/proxy?url=${encodeURIComponent(url)}"`;
+                });
+                text = text.replace(/data-src="(https?:\/\/[^"]+)"/g, (match, url) => {
+                    if (url.includes(req.get('host'))) return match;
+                    return `data-src="/proxy?url=${encodeURIComponent(url)}"`;
+                });
 
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
