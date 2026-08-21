@@ -73,7 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 画像プロキシエンドポイント（修正済み）
+// 2. 画像プロキシエンドポイント
 // ==========================================
 app.get('/proxy', async (req, res) => {
     const rawUrl = req.query.url;
@@ -85,15 +85,17 @@ app.get('/proxy', async (req, res) => {
 
     // もし _img_proxy_ が含まれていたら、正しいCDN URLを抽出
     if (url.includes('_img_proxy_')) {
-        const match = url.match(/https?:\/\/[^\/]+\.com[^"']+/);
-        if (match) {
-            url = match[0];
-        } else {
-            // それでもダメなら cdn.mangaraw123.com を探す
-            const cdnMatch = url.match(/cdn\.mangaraw123\.com[^"'\s]+/);
-            if (cdnMatch) {
-                url = 'https://' + cdnMatch[0];
-            }
+        const cdnMatch = url.match(/cdn\.mangaraw123\.com[^"'\s]+/);
+        if (cdnMatch) {
+            url = 'https://' + cdnMatch[0];
+        }
+    }
+
+    // もし自分のホストが含まれていたら除去
+    if (url.includes('mangarw-production-b003.up.railway.app')) {
+        const cdnMatch = url.match(/cdn\.mangaraw123\.com[^"'\s]+/);
+        if (cdnMatch) {
+            url = 'https://' + cdnMatch[0];
         }
     }
 
@@ -153,49 +155,53 @@ const INJECT_CODE = `
     };
     setInterval(nuke, 2000);
 
-    function getImageUrlFromDataAttribute(value) {
-      // カンマ区切りの場合は分割
+    // ★★★ 完全に書き直した画像抽出関数 ★★★
+    function extractCleanImageUrl(value) {
+      if (!value) return null;
+
+      // 1. カンマ区切りを処理
       if (value.includes(',')) {
         const parts = value.split(',').map(s => s.trim());
-        // 最初の部分が完全なURL（プロトコル付き）ならそれを優先
         for (let part of parts) {
-          if (part.startsWith('http://') || part.startsWith('https://')) {
-            // ただし自分自身のドメインは除外（ループ防止）
-            if (!part.includes(window.location.hostname)) {
-              return part;
-            }
-          }
-        }
-        // それ以外なら cdn.mangaraw123.com を含む部分を探す
-        for (let part of parts) {
+          // cdn.mangaraw123.com を含む部分を探す（最優先）
           if (part.includes('cdn.mangaraw123.com')) {
-            // プロトコルがなければ https:// を付ける
-            if (part.startsWith('cdn.mangaraw123.com')) {
-              return 'https://' + part;
-            }
+            const match = part.match(/cdn\.mangaraw123\.com[^"'\s]+/);
+            if (match) return 'https://' + match[0];
+          }
+          // 自分のドメインを含まず、httpで始まるものを探す
+          if (!part.includes(window.location.hostname) && (part.startsWith('http://') || part.startsWith('https://'))) {
             return part;
           }
         }
-        // どれもダメなら最初の部分（ただし自分のホストは避ける）
+        // 見つからなければ最初の部分を使う（ただし自分のドメインは除外）
         for (let part of parts) {
           if (!part.includes(window.location.hostname)) {
             return part;
           }
         }
-        // やむを得ず最初の部分を使う
-        return parts[0];
-      } else {
-        // カンマがない場合：そのまま使うが、自分のホストは除外
-        if (value.includes(window.location.hostname)) {
-          // 自分自身へのリンクなら、_img_proxy_ を除去して CDN URL を抽出
-          const cdnMatch = value.match(/cdn\.mangaraw123\.com[^"'\s]+/);
-          if (cdnMatch) {
-            return 'https://' + cdnMatch[0];
-          }
-          return null;
-        }
+        return null;
+      }
+
+      // 2. カンマがない場合
+      // cdn.mangaraw123.com を含むかチェック
+      if (value.includes('cdn.mangaraw123.com')) {
+        const match = value.match(/cdn\.mangaraw123\.com[^"'\s]+/);
+        if (match) return 'https://' + match[0];
+      }
+
+      // 自分のドメインなら除去して再抽出
+      if (value.includes(window.location.hostname)) {
+        const cdnMatch = value.match(/cdn\.mangaraw123\.com[^"'\s]+/);
+        if (cdnMatch) return 'https://' + cdnMatch[0];
+        return null;
+      }
+
+      // それ以外はそのまま返す
+      if (value.startsWith('http://') || value.startsWith('https://')) {
         return value;
       }
+
+      return null;
     }
 
     function forceLoadImages() {
@@ -211,19 +217,15 @@ const INJECT_CODE = `
                           img.getAttribute('data-lazy') || 
                           img.getAttribute('data-original');
           if (dataSrc) {
-            let url = getImageUrlFromDataAttribute(dataSrc);
-            if (url) {
-              // プロトコルがない場合は https:// を補完
-              if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('/')) {
-                url = 'https://' + url;
-              }
+            const cleanUrl = extractCleanImageUrl(dataSrc);
+            if (cleanUrl) {
               // 絶対URLならプロキシ経由に変換
-              if (url.startsWith('http')) {
-                img.src = '/proxy?url=' + encodeURIComponent(url);
+              if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
+                img.src = '/proxy?url=' + encodeURIComponent(cleanUrl);
               } else {
-                img.src = url; // 相対パスはそのまま（プロキシが処理）
+                img.src = cleanUrl;
               }
-              console.log('🔵 Loaded from data attribute:', url);
+              console.log('🔵 Loaded from data attribute:', cleanUrl);
               return;
             }
           }
@@ -231,10 +233,10 @@ const INJECT_CODE = `
           // 2. lazy: 属性からURLを抽出
           for (let attr of img.attributes) {
             if (attr.name.startsWith('lazy:')) {
-              const urlMatch = attr.value.match(/(https?:\\/\\/[^\\s"']+)/);
-              if (urlMatch) {
-                img.src = '/proxy?url=' + encodeURIComponent(urlMatch[1]);
-                console.log('🔵 Loaded from lazy attribute:', urlMatch[1]);
+              const cleanUrl = extractCleanImageUrl(attr.value);
+              if (cleanUrl) {
+                img.src = '/proxy?url=' + encodeURIComponent(cleanUrl);
+                console.log('🔵 Loaded from lazy attribute:', cleanUrl);
                 return;
               }
             }
@@ -244,17 +246,25 @@ const INJECT_CODE = `
           if (!img.src && img.srcset) {
             const firstSrc = img.srcset.split(',')[0].trim().split(' ')[0];
             if (firstSrc) {
-              img.src = '/proxy?url=' + encodeURIComponent(firstSrc);
-              console.log('🔵 Loaded from srcset:', firstSrc);
-              return;
+              const cleanUrl = extractCleanImageUrl(firstSrc);
+              if (cleanUrl) {
+                img.src = '/proxy?url=' + encodeURIComponent(cleanUrl);
+                console.log('🔵 Loaded from srcset:', cleanUrl);
+                return;
+              }
             }
           }
 
           // 4. 既存のsrcが絶対URLならプロキシ経由に書き換え
-          if (img.src && img.src.startsWith('http') && !img.src.startsWith('/proxy')) {
-            const originalSrc = img.src;
-            img.src = '/proxy?url=' + encodeURIComponent(originalSrc);
-            console.log('🔵 Rewrote absolute URL to proxy:', originalSrc);
+          if (img.src && (img.src.startsWith('http://') || img.src.startsWith('https://')) && !img.src.startsWith('/proxy')) {
+            const cleanUrl = extractCleanImageUrl(img.src);
+            if (cleanUrl && cleanUrl !== img.src) {
+              img.src = '/proxy?url=' + encodeURIComponent(cleanUrl);
+              console.log('🔵 Rewrote URL to proxy:', cleanUrl);
+            } else if (cleanUrl) {
+              img.src = '/proxy?url=' + encodeURIComponent(cleanUrl);
+              console.log('🔵 Rewrote absolute URL to proxy:', cleanUrl);
+            }
           }
         });
       } catch(e) {
@@ -295,7 +305,7 @@ const INJECT_CODE = `
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
-    if (req.url.startsWith('/proxy')) return; // プロキシエンドポイントは別途処理済み
+    if (req.url.startsWith('/proxy')) return;
 
     const maxRetries = workers.length;
     let attempt = 0;
@@ -370,12 +380,15 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // ★ 画像URL（src）のみプロキシ経由に書き換え（data-srcは変更しない） ★
+                // ★ 画像URL（src）のみプロキシ経由に書き換え ★
                 text = text.replace(/src="(https?:\/\/[^"]+)"/g, (match, url) => {
                     if (url.includes(req.get('host'))) return match;
-                    return `src="/proxy?url=${encodeURIComponent(url)}"`;
+                    // cdn.mangaraw123.com を含むならそのままプロキシ経由に
+                    if (url.includes('cdn.mangaraw123.com')) {
+                        return `src="/proxy?url=${encodeURIComponent(url)}"`;
+                    }
+                    return match;
                 });
-                // data-src はそのまま残す（ブラウザ側で処理）
 
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
