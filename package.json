@@ -7,6 +7,8 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "iconv-lite": "^0.6.3",
+    "zstd-codec": "^0.1.4"
   }
 }
