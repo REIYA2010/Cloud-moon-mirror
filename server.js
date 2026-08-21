@@ -73,7 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 広告ブロック用
+// 2. 広告ブロック用 ＋ 画像強制読み込み
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -88,7 +88,10 @@ const INJECT_CODE = `
 </style>
 <script>
   (function() {
+    // 1. ポップアップを殺す
     window.open = function() { return null; };
+
+    // 2. 動的な透明オーバーレイを監視して削除
     const nuke = () => {
       document.querySelectorAll('div, a').forEach(el => {
         const s = window.getComputedStyle(el);
@@ -99,21 +102,95 @@ const INJECT_CODE = `
       });
     };
     setInterval(nuke, 2000);
-    const prefetch = () => {
-      const imgs = Array.from(document.querySelectorAll('img[data-src]'));
-      const obs = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-          if (entry.isIntersecting) {
-            const idx = imgs.indexOf(entry.target);
-            for(let i=1; i<=5; i++) {
-              if(imgs[idx+i]) imgs[idx+i].src = imgs[idx+i].dataset.src;
+
+    // ★★★ 画像を強制的に読み込む（このサイト専用） ★★★
+    function forceLoadImages() {
+      // すべての img タグを取得
+      const images = document.querySelectorAll('img');
+      images.forEach(img => {
+        // 1. data-src があれば src にセット
+        const dataSrc = img.getAttribute('data-src');
+        if (dataSrc && !img.src) {
+          img.src = dataSrc;
+          console.log('🔵 Loaded image from data-src:', dataSrc);
+        }
+
+        // 2. data-lazy があれば src にセット
+        const dataLazy = img.getAttribute('data-lazy');
+        if (dataLazy && !img.src) {
+          img.src = dataLazy;
+          console.log('🔵 Loaded image from data-lazy:', dataLazy);
+        }
+
+        // 3. data-original があれば src にセット
+        const dataOriginal = img.getAttribute('data-original');
+        if (dataOriginal && !img.src) {
+          img.src = dataOriginal;
+          console.log('🔵 Loaded image from data-original:', dataOriginal);
+        }
+
+        // 4. lazy: から始まる属性があれば、そこからURLを抽出（このサイト専用）
+        for (let attr of img.attributes) {
+          if (attr.name.startsWith('lazy:')) {
+            // 属性値にURLが含まれているかチェック
+            const value = attr.value;
+            const urlMatch = value.match(/(https?:\\/\\/[^\\s"']+)/);
+            if (urlMatch && !img.src) {
+              img.src = urlMatch[1];
+              console.log('🔵 Loaded image from lazy attribute:', urlMatch[1]);
             }
           }
-        });
-      }, { rootMargin: '3000px' });
-      imgs.forEach(img => obs.observe(img));
-    };
-    document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', prefetch) : prefetch();
+        }
+
+        // 5. 画像が読み込まれていない場合、背景画像として設定されている可能性をチェック
+        if (!img.src) {
+          const style = img.getAttribute('style') || '';
+          const bgMatch = style.match(/url\\(['"]?([^'")]+)['"]?\\)/);
+          if (bgMatch) {
+            // 背景画像を img の src として設定
+            img.src = bgMatch[1];
+            console.log('🔵 Loaded image from background-image:', bgMatch[1]);
+          }
+        }
+      });
+
+      // picture タグ内の source タグにも対応
+      document.querySelectorAll('source[data-srcset]').forEach(source => {
+        const dataSrcset = source.getAttribute('data-srcset');
+        if (dataSrcset) {
+          source.srcset = dataSrcset;
+        }
+      });
+    }
+
+    // DOM読み込み時に実行
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', forceLoadImages);
+    } else {
+      forceLoadImages();
+    }
+
+    // 動的に追加される画像にも対応（MutationObserver）
+    const observer = new MutationObserver(() => {
+      forceLoadImages();
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+
+    // スクロール時にも再実行（遅延読み込み対策）
+    let scrollTimer;
+    window.addEventListener('scroll', () => {
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(forceLoadImages, 300);
+    });
+
+    // 3秒後にももう一度実行（保険）
+    setTimeout(forceLoadImages, 3000);
+    setTimeout(forceLoadImages, 5000);
+
+    console.log('🟢 Image force-load script injected successfully');
   })();
 </script>
 `;
@@ -160,7 +237,6 @@ app.all('*', async (req, res) => {
 
             markWorkerSuccess(worker);
 
-            // レスポンスヘッダーの転送（Content-Encoding は後で上書き）
             response.headers.forEach((v, k) => {
                 if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy'].includes(k.toLowerCase())) {
                     res.set(k, v);
@@ -170,13 +246,12 @@ app.all('*', async (req, res) => {
             const contentType = response.headers.get("content-type") || "";
             let buffer = await response.buffer();
 
-            // ★ zstd 圧縮されていたら解凍（全リソース対象） ★
+            // zstd 圧縮されていたら解凍
             const contentEncoding = response.headers.get('content-encoding');
             if (contentEncoding && contentEncoding.includes('zstd')) {
                 try {
                     buffer = await zstd.decompress(buffer);
                     console.log(`✅ Decompressed zstd: ${req.url}`);
-                    // 解凍したので Content-Encoding ヘッダーは削除（または identity に）
                     res.removeHeader('content-encoding');
                 } catch (e) {
                     console.warn(`⚠️ zstd decompression failed for ${req.url}:`, e.message);
@@ -206,21 +281,18 @@ app.all('*', async (req, res) => {
                 return res.status(response.status).send(text);
             }
 
-            // --- 画像・CSS・JS など（バイナリまたはテキスト） ---
-            // 画像（png/jpg/webp など）は Buffer をそのまま送信
+            // --- 画像・CSS・JS など ---
             if (contentType.includes('image') || contentType.includes('font') || contentType.includes('application/octet-stream')) {
                 res.set('Content-Type', contentType);
                 return res.status(response.status).send(buffer);
             }
 
-            // CSS / JavaScript などのテキスト系は UTF-8 として送信
             if (contentType.includes('text') || contentType.includes('javascript') || contentType.includes('json')) {
                 const text = buffer.toString('utf-8');
                 res.set('Content-Type', contentType);
                 return res.status(response.status).send(text);
             }
 
-            // その他（デフォルト）
             res.set('Content-Type', contentType);
             return res.status(response.status).send(buffer);
 
