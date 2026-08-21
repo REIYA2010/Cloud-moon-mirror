@@ -73,7 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 広告ブロック用 ＋ 画像強制読み込み
+// 2. 広告ブロック用 ＋ 画像強制読み込み（修正版）
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -103,92 +103,109 @@ const INJECT_CODE = `
     };
     setInterval(nuke, 2000);
 
-    // ★★★ 画像を強制的に読み込む（このサイト専用） ★★★
+    // ★★★ 画像を強制的に読み込む（エラー対策版） ★★★
     function forceLoadImages() {
-      // すべての img タグを取得
-      const images = document.querySelectorAll('img');
-      images.forEach(img => {
-        // 1. data-src があれば src にセット
-        const dataSrc = img.getAttribute('data-src');
-        if (dataSrc && !img.src) {
-          img.src = dataSrc;
-          console.log('🔵 Loaded image from data-src:', dataSrc);
-        }
+      try {
+        const images = document.querySelectorAll('img');
+        images.forEach(img => {
+          // すでに読み込まれている場合はスキップ
+          if (img.complete && img.naturalWidth > 0) return;
 
-        // 2. data-lazy があれば src にセット
-        const dataLazy = img.getAttribute('data-lazy');
-        if (dataLazy && !img.src) {
-          img.src = dataLazy;
-          console.log('🔵 Loaded image from data-lazy:', dataLazy);
-        }
+          // data-src / data-lazy / data-original から取得
+          const dataSrc = img.getAttribute('data-src') || 
+                          img.getAttribute('data-lazy') || 
+                          img.getAttribute('data-original');
+          if (dataSrc && !img.src) {
+            // URLエンコード処理（日本語ファイル名対策）
+            try {
+              const url = new URL(dataSrc, window.location.origin);
+              img.src = url.toString();
+            } catch {
+              img.src = dataSrc;
+            }
+            console.log('🔵 Loaded image from data attribute:', img.src);
+            return;
+          }
 
-        // 3. data-original があれば src にセット
-        const dataOriginal = img.getAttribute('data-original');
-        if (dataOriginal && !img.src) {
-          img.src = dataOriginal;
-          console.log('🔵 Loaded image from data-original:', dataOriginal);
-        }
-
-        // 4. lazy: から始まる属性があれば、そこからURLを抽出（このサイト専用）
-        for (let attr of img.attributes) {
-          if (attr.name.startsWith('lazy:')) {
-            // 属性値にURLが含まれているかチェック
-            const value = attr.value;
-            const urlMatch = value.match(/(https?:\\/\\/[^\\s"']+)/);
-            if (urlMatch && !img.src) {
-              img.src = urlMatch[1];
-              console.log('🔵 Loaded image from lazy attribute:', urlMatch[1]);
+          // lazy: 属性からURLを抽出
+          for (let attr of img.attributes) {
+            if (attr.name.startsWith('lazy:')) {
+              const urlMatch = attr.value.match(/(https?:\\/\\/[^\\s"']+)/);
+              if (urlMatch && !img.src) {
+                img.src = urlMatch[1];
+                console.log('🔵 Loaded image from lazy attribute:', img.src);
+                return;
+              }
             }
           }
-        }
 
-        // 5. 画像が読み込まれていない場合、背景画像として設定されている可能性をチェック
-        if (!img.src) {
-          const style = img.getAttribute('style') || '';
-          const bgMatch = style.match(/url\\(['"]?([^'")]+)['"]?\\)/);
-          if (bgMatch) {
-            // 背景画像を img の src として設定
-            img.src = bgMatch[1];
-            console.log('🔵 Loaded image from background-image:', bgMatch[1]);
+          // 背景画像を src として設定
+          if (!img.src) {
+            const style = img.getAttribute('style') || '';
+            const bgMatch = style.match(/url\\(['"]?([^'")]+)['"]?\\)/);
+            if (bgMatch) {
+              img.src = bgMatch[1];
+              console.log('🔵 Loaded image from background-image:', img.src);
+              return;
+            }
           }
-        }
-      });
 
-      // picture タグ内の source タグにも対応
-      document.querySelectorAll('source[data-srcset]').forEach(source => {
-        const dataSrcset = source.getAttribute('data-srcset');
-        if (dataSrcset) {
-          source.srcset = dataSrcset;
-        }
-      });
+          // src が空で、srcset だけがある場合
+          if (!img.src && img.srcset) {
+            const firstSrc = img.srcset.split(',')[0].trim().split(' ')[0];
+            if (firstSrc) {
+              img.src = firstSrc;
+              console.log('🔵 Loaded image from srcset:', img.src);
+            }
+          }
+        });
+
+        // picture > source タグ対応
+        document.querySelectorAll('source[data-srcset]').forEach(source => {
+          const dataSrcset = source.getAttribute('data-srcset');
+          if (dataSrcset) {
+            source.srcset = dataSrcset;
+          }
+        });
+      } catch(e) {
+        console.warn('⚠️ forceLoadImages error:', e.message);
+      }
     }
 
-    // DOM読み込み時に実行
+    // DOM読み込み時に実行（遅延させて確実に）
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', forceLoadImages);
+      document.addEventListener('DOMContentLoaded', () => {
+        setTimeout(forceLoadImages, 500);
+      });
     } else {
-      forceLoadImages();
+      setTimeout(forceLoadImages, 500);
     }
 
-    // 動的に追加される画像にも対応（MutationObserver）
-    const observer = new MutationObserver(() => {
-      forceLoadImages();
-    });
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
+    // MutationObserver（エラー対策：bodyが存在する場合のみ）
+    try {
+      if (document.body) {
+        const observer = new MutationObserver(() => {
+          setTimeout(forceLoadImages, 300);
+        });
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true
+        });
+        console.log('🟢 MutationObserver started');
+      }
+    } catch(e) {
+      console.warn('⚠️ MutationObserver setup failed:', e.message);
+    }
 
-    // スクロール時にも再実行（遅延読み込み対策）
+    // スクロール時にも再実行
     let scrollTimer;
     window.addEventListener('scroll', () => {
       clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(forceLoadImages, 300);
+      scrollTimer = setTimeout(forceLoadImages, 400);
     });
 
-    // 3秒後にももう一度実行（保険）
-    setTimeout(forceLoadImages, 3000);
-    setTimeout(forceLoadImages, 5000);
+    // 定期的に再実行（保険）
+    setInterval(forceLoadImages, 5000);
 
     console.log('🟢 Image force-load script injected successfully');
   })();
@@ -196,7 +213,7 @@ const INJECT_CODE = `
 `;
 
 // ==========================================
-// 3. メインプロキシ（全リソースで zstd 解凍対応）
+// 3. メインプロキシ
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -246,7 +263,6 @@ app.all('*', async (req, res) => {
             const contentType = response.headers.get("content-type") || "";
             let buffer = await response.buffer();
 
-            // zstd 圧縮されていたら解凍
             const contentEncoding = response.headers.get('content-encoding');
             if (contentEncoding && contentEncoding.includes('zstd')) {
                 try {
@@ -258,7 +274,6 @@ app.all('*', async (req, res) => {
                 }
             }
 
-            // --- HTML の場合：広告ブロックを注入 ---
             if (contentType.includes("text/html")) {
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
@@ -281,7 +296,6 @@ app.all('*', async (req, res) => {
                 return res.status(response.status).send(text);
             }
 
-            // --- 画像・CSS・JS など ---
             if (contentType.includes('image') || contentType.includes('font') || contentType.includes('application/octet-stream')) {
                 res.set('Content-Type', contentType);
                 return res.status(response.status).send(buffer);
