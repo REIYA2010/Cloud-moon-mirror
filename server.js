@@ -73,7 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 広告ブロック用
+// 2. 広告ブロック用（簡素化）
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -138,7 +138,7 @@ app.get('/_img_proxy/*', async (req, res) => {
 });
 
 // ==========================================
-// 4. メインプロキシ（HTML書き換え）
+// 4. メインプロキシ（HTML書き換えを強化）
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -217,28 +217,31 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // ★★★ 画像URLを強制書き換え（必ず / で始まる絶対パスにする） ★★★
-                function extractFileNameFromUrl(url) {
-                    if (!url) return null;
-                    const parts = url.split(',').map(s => s.trim());
+                // ★★★ 強力かつ網羅的な画像URL書き換え ★★★
+                // ファイル名（拡張子付き）を抽出する関数（カンマ区切り対応）
+                function extractFileName(value) {
+                    if (!value) return null;
+                    // カンマで分割して各部分をチェック
+                    const parts = value.split(',').map(s => s.trim());
                     for (let part of parts) {
-                        const match = part.match(/([^\/\\s"']+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                        // 拡張子を含むファイル名を抽出（クエリパラメータを無視）
+                        const match = part.match(/([^\/\\s"']+\.(jpg|jpeg|png|webp|gif|bmp|svg))(?:\?|$)/i);
                         if (match) return match[1];
                     }
-                    const match = url.match(/([^\/\\s"']+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
+                    // カンマがない場合は直接抽出
+                    const match = value.match(/([^\/\\s"']+\.(jpg|jpeg|png|webp|gif|bmp|svg))(?:\?|$)/i);
                     return match ? match[1] : null;
                 }
 
-                // 絶対パスを生成するヘルパー（先頭スラッシュを必ず付ける）
+                // 絶対パスを生成（先頭スラッシュ必須）
                 function makeAbsolutePath(fileName) {
                     return '/' + '_img_proxy/_cdn.mangaraw123.com/covers/' + fileName;
                 }
 
-                // 1. src 属性
+                // 1. すべての img タグの src 属性を書き換え
                 text = text.replace(/<img([^>]*)src=["']([^"']*)["']([^>]*)>/gi, (match, before, srcVal, after) => {
-                    if (srcVal.startsWith('/_img_proxy/')) return match;
-                    if (srcVal.startsWith('data:') || !srcVal) return match;
-                    const fileName = extractFileNameFromUrl(srcVal);
+                    if (!srcVal || srcVal.startsWith('data:') || srcVal.startsWith('/_img_proxy/')) return match;
+                    const fileName = extractFileName(srcVal);
                     if (fileName) {
                         const newSrc = makeAbsolutePath(fileName);
                         console.log(`🔵 src rewrite: ${srcVal} -> ${newSrc}`);
@@ -247,14 +250,13 @@ app.all('*', async (req, res) => {
                     return match;
                 });
 
-                // 2. data-src / data-lazy / data-original / data-srcset
-                const lazyAttributes = ['data-src', 'data-lazy', 'data-original', 'data-srcset'];
-                for (const attr of lazyAttributes) {
+                // 2. data-src / data-lazy / data-original / data-srcset を書き換え
+                const lazyAttrs = ['data-src', 'data-lazy', 'data-original', 'data-srcset'];
+                for (const attr of lazyAttrs) {
                     const regex = new RegExp(`<img([^>]*)${attr}=["']([^"']*)["']([^>]*)>`, 'gi');
                     text = text.replace(regex, (match, before, attrVal, after) => {
-                        if (attrVal.startsWith('/_img_proxy/')) return match;
-                        if (attrVal.startsWith('data:') || !attrVal) return match;
-                        const fileName = extractFileNameFromUrl(attrVal);
+                        if (!attrVal || attrVal.startsWith('data:') || attrVal.startsWith('/_img_proxy/')) return match;
+                        const fileName = extractFileName(attrVal);
                         if (fileName) {
                             const newVal = makeAbsolutePath(fileName);
                             console.log(`🔵 ${attr} rewrite: ${attrVal} -> ${newVal}`);
@@ -264,27 +266,35 @@ app.all('*', async (req, res) => {
                     });
                 }
 
-                // 3. 既存の不正な Worker パスを正規化（先頭スラッシュを必ず付ける）
-                text = text.replace(/_img_proxy_?\/_?cdn\.mangaraw123\.com\/covers\/([^"'\s]+)/g, (match, fileName) => {
-                    const newSrc = makeAbsolutePath(fileName);
-                    console.log(`🔵 Normalize: ${match} -> ${newSrc}`);
-                    return newSrc;
-                });
-
-                // 4. 先頭スラッシュがない Worker パスを修正（これが今回の根本原因）
+                // 3. 先頭スラッシュがない Worker パスを修正（_img_proxy/... を /_img_proxy/... に）
                 text = text.replace(/["']_img_proxy\/_cdn\.mangaraw123\.com\/covers\/([^"']+)["']/g, (match, fileName) => {
                     const newSrc = makeAbsolutePath(fileName);
                     console.log(`🔵 Fix missing slash: ${match} -> "${newSrc}"`);
                     return `"${newSrc}"`;
                 });
 
-                // 5. プロトコルレスURL
+                // 4. プロトコルレスURL（//cdn...）を Worker パスに
                 text = text.replace(/src=["']\/\/cdn\.mangaraw123\.com\/covers\/([^"']+)["']/g, (match, fileName) => {
                     const newSrc = makeAbsolutePath(fileName);
                     console.log(`🔵 Protocol-relative rewrite: ${match} -> src="${newSrc}"`);
                     return `src="${newSrc}"`;
                 });
 
+                // 5. 絶対URL（https://cdn...）を Worker パスに
+                text = text.replace(/src=["']https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"']+)["']/g, (match, fileName) => {
+                    const newSrc = makeAbsolutePath(fileName);
+                    console.log(`🔵 Absolute URL rewrite: ${match} -> src="${newSrc}"`);
+                    return `src="${newSrc}"`;
+                });
+
+                // 6. さらに、data-src でも同様の絶対URL書き換え
+                text = text.replace(/data-src=["']https?:\/\/cdn\.mangaraw123\.com\/covers\/([^"']+)["']/g, (match, fileName) => {
+                    const newSrc = makeAbsolutePath(fileName);
+                    console.log(`🔵 data-src absolute rewrite: ${match} -> data-src="${newSrc}"`);
+                    return `data-src="${newSrc}"`;
+                });
+
+                // 広告ブロック注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
                 return res.status(response.status).send(text);
