@@ -150,6 +150,11 @@ app.all('*', async (req, res) => {
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
             });
 
+            console.log(`🔍 Request: ${req.method} ${req.url} -> ${targetUrl}`);          // ★ 追加
+            console.log(`🔍 Response status: ${response.status}`);                         // ★ 追加
+            console.log(`🔍 Content-Type: ${response.headers.get('content-type')}`);       // ★ 追加
+            console.log(`🔍 Content-Encoding: ${response.headers.get('content-encoding')}`); // ★ 追加
+
             if (response.status >= 500) {
                 console.warn(`⚠️ Worker [${worker.url}] returned HTTP ${response.status}. Retrying...`);
                 markWorkerFailure(worker);
@@ -179,6 +184,8 @@ app.all('*', async (req, res) => {
                     } catch (e) {
                         console.warn('⚠️ Manual gunzip failed');
                     }
+                } else {
+                    console.log('ℹ️ No gzip encoding, skipping gunzip'); // ★ 追加
                 }
 
                 let charset = 'utf-8';
