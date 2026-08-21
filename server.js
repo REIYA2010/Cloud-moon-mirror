@@ -1,6 +1,7 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
+const iconv = require('iconv-lite');
 const app = express();
 
 // ==========================================
@@ -12,7 +13,6 @@ const WORKER_CONFIGS = [
     "https://tuneninemui.nemu0001.workers.dev"
 ];
 
-// Workerの状態管理プール
 const workers = WORKER_CONFIGS.map(url => ({
     url: url.replace(/\/$/, ''),
     isAlive: true,
@@ -21,7 +21,6 @@ const workers = WORKER_CONFIGS.map(url => ({
 
 let rrIndex = 0;
 
-// 【ヘルパー】生存している Worker をラウンドロビンで1つ選出
 function getActiveWorker() {
     const active = workers.filter(w => w.isAlive);
     if (active.length === 0) {
@@ -32,7 +31,6 @@ function getActiveWorker() {
     return active[rrIndex++ % active.length];
 }
 
-// 障害判定
 function markWorkerFailure(worker) {
     worker.failCount++;
     console.warn(`⚠️ Worker [${worker.url}] failed (${worker.failCount}/3)`);
@@ -42,20 +40,17 @@ function markWorkerFailure(worker) {
     }
 }
 
-// 正常復帰
 function markWorkerSuccess(worker) {
     worker.failCount = 0;
     worker.isAlive = true;
 }
 
-// ★ 通信安定化エージェントを先に定義（setInterval より前に移動）★
 const proxyAgent = new https.Agent({
     keepAlive: true,
     maxSockets: 600,
     timeout: 60000
 });
 
-// 【バックグラウンドヘルスチェック】障害Workerの自動復帰診断（30秒周期）
 setInterval(async () => {
     for (const w of workers) {
         if (!w.isAlive) {
@@ -69,9 +64,7 @@ setInterval(async () => {
                     console.log(`✅ Worker [${w.url}] RECOVERED & BACK ALIVE!`);
                     markWorkerSuccess(w);
                 }
-            } catch (e) {
-                // 復帰失敗時は静観
-            }
+            } catch (e) {}
         }
     }
 }, 30000);
@@ -79,26 +72,14 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 広告抹殺パターン（★ 今回は使用しません ★）
+// 2. 広告ブロック用（ブラウザ側で動作）
 // ==========================================
-const AD_DOMAINS = [
-    'universityshocksooner.com',
-    'adexchangerapid.com',
-    'platform.pubadx.one',
-    'preferencenail.com',
-    'gomuraw.js',
-    'vntsm.com'
-];
-
-// ブラウザ内で動く強力な広告クリーナー（このまま有効）
 const INJECT_CODE = `
 <style>
-  /* 広告枠を強制非表示 */
   iframe, .pop--excl, .bg-ssp-11557, [id*="bg-ssp"], [class*="ad-"], 
   [style*="2147483647"], [style*="9999"], #toast { 
     display: none !important; visibility: hidden !important; pointer-events: none !important; 
   }
-  /* 続きを読むボタンを保護 */
   #load-more-chapters, .load-more, .read-more {
     display: block !important; visibility: visible !important; opacity: 1 !important;
     background-color: #3b82f6 !important; color: white !important;
@@ -106,10 +87,7 @@ const INJECT_CODE = `
 </style>
 <script>
   (function() {
-    // 1. ポップアップを殺す
     window.open = function() { return null; };
-    
-    // 2. 動的な透明オーバーレイを監視して削除
     const nuke = () => {
       document.querySelectorAll('div, a').forEach(el => {
         const s = window.getComputedStyle(el);
@@ -120,8 +98,6 @@ const INJECT_CODE = `
       });
     };
     setInterval(nuke, 2000);
-
-    // 3. 画像の5枚先読み（高速化）
     const prefetch = () => {
       const imgs = Array.from(document.querySelectorAll('img[data-src]'));
       const obs = new IntersectionObserver((entries) => {
@@ -142,7 +118,7 @@ const INJECT_CODE = `
 `;
 
 // ==========================================
-// 3. メインプロキシロジック（自動リトライ機能付）
+// 3. メインプロキシロジック
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -162,24 +138,26 @@ app.all('*', async (req, res) => {
         headers['X-Forwarded-Proto'] = 'https';
 
         try {
+            // ★ compress: true（デフォルト）に修正 ★
             const response = await fetch(targetUrl, {
                 method: req.method,
                 headers: headers,
                 agent: proxyAgent,
-                compress: false,                    // ★ 圧縮を無効化（文字化け対策）★
+                // compress: true,   // デフォルトなので指定しなくてOK
                 redirect: 'follow',
                 timeout: 12000,
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
             });
 
             if (response.status >= 500) {
-                console.warn(`⚠️ Worker [${worker.url}] returned HTTP ${response.status}. Retrying another worker...`);
+                console.warn(`⚠️ Worker [${worker.url}] returned HTTP ${response.status}. Retrying...`);
                 markWorkerFailure(worker);
                 continue;
             }
 
             markWorkerSuccess(worker);
 
+            // レスポンスヘッダーを転送（一部フィルタリング）
             response.headers.forEach((v, k) => {
                 if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy'].includes(k.toLowerCase())) {
                     res.set(k, v);
@@ -190,30 +168,39 @@ app.all('*', async (req, res) => {
 
             // --- HTMLの場合 ---
             if (contentType.includes("text/html")) {
-                let text = await response.text();
+                // ★ 解凍済みのバッファを取得（compress:true のおかげでgzipは自動解除）★
+                const buffer = await response.buffer();
 
-                // ★★★ 広告置換を完全に無効化（画像URL破壊を防止）★★★
-                /*
-                AD_DOMAINS.forEach(domain => {
-                    const regex = new RegExp('<script[^>]*' + domain.replace('.', '\\.') + '[^>]*><\\/script>', 'gi');
-                    text = text.replace(regex, "");
-                    text = text.split(domain).join("localhost");
-                });
-                text = text.replace(/<a[^>]*adexchangerapid\.com[^>]*>.*?<\/a>/gi, "");
-                */
+                // ★ ヘッダーからcharsetを取得（なければutf-8）★
+                let charset = 'utf-8';
+                const charsetMatch = contentType.match(/charset=([^;]+)/);
+                if (charsetMatch) {
+                    charset = charsetMatch[1].toLowerCase();
+                } else {
+                    // ヘッダーにcharsetがない場合はShift-JISを試す
+                    charset = 'shift_jis';
+                }
 
-                // 広告ブロック用JS/CSSは注入（ブラウザ側で頑張ってもらう）
+                // ★ 指定charsetでデコード ★
+                let text = iconv.decode(buffer, charset);
+
+                // ★ UTF-8でデコードして文字化けの兆候があればShift-JISで再試行 ★
+                if (charset === 'utf-8' && /[\uFFFD�]/.test(text)) {
+                    console.warn('⚠️ UTF-8 decode appears broken, retrying with Shift-JIS');
+                    text = iconv.decode(buffer, 'shift_jis');
+                    charset = 'shift_jis';
+                }
+
+                // 広告ブロック用JS/CSSを注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
 
-                // ★ charsetを元のHTMLのものに維持（UTF-8強制をやめる）★
-                const charsetMatch = contentType.match(/charset=([^;]+)/);
-                const charset = charsetMatch ? charsetMatch[1] : 'utf-8';
+                // レスポンスのContent-Typeをデコードに使ったcharsetに合わせる
                 res.set("Content-Type", `text/html; charset=${charset}`);
 
                 return res.status(response.status).send(text);
             }
 
-            // --- 画像・JS・CSSの場合：ストリーミング ---
+            // --- 画像・JS・CSS ---
             if (req.url.includes('_p_')) {
                 res.set('Cache-Control', 'public, max-age=31536000, immutable');
             }
