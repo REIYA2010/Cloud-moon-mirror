@@ -73,7 +73,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 画像プロキシエンドポイント（修正版）
+// 2. 画像プロキシエンドポイント（最終版）
 // ==========================================
 app.get('/proxy', async (req, res) => {
     const rawUrl = req.query.url;
@@ -88,7 +88,6 @@ app.get('/proxy', async (req, res) => {
         const fileMatch = url.match(/([^\/]+\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
         if (fileMatch) {
             const fileName = fileMatch[1];
-            // Worker のいずれかを使う（ラウンドロビン）
             const worker = getActiveWorker();
             const workerUrl = worker.url + '/_img_proxy_/cdn.mangaraw123.com/covers/' + fileName;
             console.log(`🖼️ Fetching via Worker: ${workerUrl}`);
@@ -140,7 +139,7 @@ app.get('/proxy', async (req, res) => {
 });
 
 // ==========================================
-// 3. 広告ブロック用 ＋ 画像強制読み込み
+// 3. 広告ブロック用 ＋ 画像強制読み込み（最終版）
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -168,7 +167,7 @@ const INJECT_CODE = `
     };
     setInterval(nuke, 2000);
 
-    // ★★★ 画像抽出関数（プロキシ経由に直接変換） ★★★
+    // ★★★ 画像抽出関数 ★★★
     function extractCleanImageUrl(value) {
       if (!value) return null;
 
@@ -176,10 +175,7 @@ const INJECT_CODE = `
       const fileMatch = value.match(/([^\/\\s"']+\\.(jpg|jpeg|png|webp|gif|bmp|svg))/i);
       if (fileMatch) {
         const fileName = fileMatch[1];
-        // ★ cdn.mangaraw123.com の場合はプロキシ経由で取得 ★
-        if (fileName) {
-          return '/proxy?url=' + encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName);
-        }
+        return '/proxy?url=' + encodeURIComponent('https://cdn.mangaraw123.com/covers/' + fileName);
       }
 
       // カンマ区切りから有効な部分を抽出
@@ -196,11 +192,24 @@ const INJECT_CODE = `
       return null;
     }
 
+    // ★★★ 画像を強制的に読み込む（srcを事前にクリア） ★★★
     function forceLoadImages() {
       try {
         const images = document.querySelectorAll('img');
         images.forEach(img => {
-          if (img.src && img.src.startsWith('/proxy')) return;
+          // すでにプロキシ経由で読み込み済みならスキップ
+          if (img.src && img.src.startsWith('/proxy')) {
+            // ただし、読み込みに失敗している場合は再試行
+            if (!img.complete || img.naturalWidth === 0) {
+              // 再読み込み
+              const currentSrc = img.src;
+              img.src = '';
+              img.src = currentSrc;
+            }
+            return;
+          }
+
+          // 読み込み完了済みの画像はスキップ（ただし壊れている場合は再試行）
           if (img.complete && img.naturalWidth > 0) return;
 
           const dataSrc = img.getAttribute('data-src') || 
@@ -209,6 +218,8 @@ const INJECT_CODE = `
           if (dataSrc) {
             const cleanUrl = extractCleanImageUrl(dataSrc);
             if (cleanUrl) {
+              // ★ src を一旦空にしてから設定（ブラウザのプリロードを抑制） ★
+              img.removeAttribute('src');
               img.src = cleanUrl;
               console.log('🔵 Loaded from data attribute:', cleanUrl);
               return;
@@ -219,6 +230,7 @@ const INJECT_CODE = `
             if (attr.name.startsWith('lazy:')) {
               const cleanUrl = extractCleanImageUrl(attr.value);
               if (cleanUrl) {
+                img.removeAttribute('src');
                 img.src = cleanUrl;
                 console.log('🔵 Loaded from lazy attribute:', cleanUrl);
                 return;
@@ -231,6 +243,7 @@ const INJECT_CODE = `
             if (firstSrc) {
               const cleanUrl = extractCleanImageUrl(firstSrc);
               if (cleanUrl) {
+                img.removeAttribute('src');
                 img.src = cleanUrl;
                 console.log('🔵 Loaded from srcset:', cleanUrl);
                 return;
@@ -241,9 +254,16 @@ const INJECT_CODE = `
           if (img.src && (img.src.startsWith('http://') || img.src.startsWith('https://')) && !img.src.startsWith('/proxy')) {
             const cleanUrl = extractCleanImageUrl(img.src);
             if (cleanUrl) {
+              img.removeAttribute('src');
               img.src = cleanUrl;
               console.log('🔵 Rewrote URL to proxy:', cleanUrl);
+              return;
             }
+          }
+
+          // それでも src が相対パスなら削除（エラーを防ぐ）
+          if (img.src && !img.src.startsWith('/') && !img.src.startsWith('http')) {
+            img.removeAttribute('src');
           }
         });
       } catch(e) {
@@ -251,15 +271,17 @@ const INJECT_CODE = `
       }
     }
 
+    // DOM読み込み時に実行（即座に）
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => setTimeout(forceLoadImages, 500));
+      document.addEventListener('DOMContentLoaded', () => setTimeout(forceLoadImages, 100));
     } else {
-      setTimeout(forceLoadImages, 500);
+      setTimeout(forceLoadImages, 100);
     }
 
+    // MutationObserver で動的追加に対応
     try {
       if (document.body) {
-        const observer = new MutationObserver(() => setTimeout(forceLoadImages, 300));
+        const observer = new MutationObserver(() => setTimeout(forceLoadImages, 200));
         observer.observe(document.body, { childList: true, subtree: true });
         console.log('🟢 MutationObserver started');
       }
@@ -267,13 +289,15 @@ const INJECT_CODE = `
       console.warn('⚠️ MutationObserver setup failed:', e.message);
     }
 
+    // スクロール時にも再実行
     let scrollTimer;
     window.addEventListener('scroll', () => {
       clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(forceLoadImages, 400);
+      scrollTimer = setTimeout(forceLoadImages, 300);
     });
 
-    setInterval(forceLoadImages, 5000);
+    // 定期実行（保険）
+    setInterval(forceLoadImages, 3000);
     console.log('🟢 Image force-load script injected');
   })();
 </script>
