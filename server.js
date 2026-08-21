@@ -140,6 +140,9 @@ app.all('*', async (req, res) => {
         headers['X-Forwarded-Host'] = req.get('host');
         headers['X-Forwarded-Proto'] = 'https';
 
+        // ★★★ これが修正ポイント（zstdを除外） ★★★
+        headers['Accept-Encoding'] = 'gzip, deflate, br';
+
         try {
             const response = await fetch(targetUrl, {
                 method: req.method,
@@ -150,10 +153,11 @@ app.all('*', async (req, res) => {
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
             });
 
-            console.log(`🔍 Request: ${req.method} ${req.url} -> ${targetUrl}`);          // ★ 追加
-            console.log(`🔍 Response status: ${response.status}`);                         // ★ 追加
-            console.log(`🔍 Content-Type: ${response.headers.get('content-type')}`);       // ★ 追加
-            console.log(`🔍 Content-Encoding: ${response.headers.get('content-encoding')}`); // ★ 追加
+            // デバッグログ（必要に応じて残す）
+            console.log(`🔍 Request: ${req.method} ${req.url} -> ${targetUrl}`);
+            console.log(`🔍 Response status: ${response.status}`);
+            console.log(`🔍 Content-Type: ${response.headers.get('content-type')}`);
+            console.log(`🔍 Content-Encoding: ${response.headers.get('content-encoding')}`);
 
             if (response.status >= 500) {
                 console.warn(`⚠️ Worker [${worker.url}] returned HTTP ${response.status}. Retrying...`);
@@ -175,7 +179,6 @@ app.all('*', async (req, res) => {
             if (contentType.includes("text/html")) {
                 let buffer = await response.buffer();
 
-                // ★ gzipなら強制解凍 ★
                 const contentEncoding = response.headers.get('content-encoding');
                 if (contentEncoding && contentEncoding.includes('gzip')) {
                     try {
@@ -185,7 +188,7 @@ app.all('*', async (req, res) => {
                         console.warn('⚠️ Manual gunzip failed');
                     }
                 } else {
-                    console.log('ℹ️ No gzip encoding, skipping gunzip'); // ★ 追加
+                    console.log(`ℹ️ Encoding is "${contentEncoding}", skipping gunzip`);
                 }
 
                 let charset = 'utf-8';
