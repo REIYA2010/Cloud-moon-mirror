@@ -2,7 +2,7 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
-const ZstdCodec = require('zstd-codec').ZstdCodec;  // 正しいインポート
+const ZstdCodec = require('zstd-codec').ZstdCodec;
 const app = express();
 
 // ==========================================
@@ -118,12 +118,12 @@ const INJECT_CODE = `
 </script>
 `;
 
-// ★ zstd 解凍関数（正しい使い方）★
+// ★ zstd 解凍関数（正しい API を使用）★
 function decompressZstd(buffer) {
     return new Promise((resolve, reject) => {
-        ZstdCodec.run((codec) => {
+        ZstdCodec.run((zstd) => {
             try {
-                const result = codec.decompress(buffer);
+                const result = zstd.decompress(buffer);
                 resolve(Buffer.from(result));
             } catch (e) {
                 reject(e);
