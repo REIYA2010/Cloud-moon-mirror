@@ -8,7 +8,8 @@ const app = express();
 // 1. 設定：Cloudflare Workers クラスター
 // ==========================================
 const WORKER_CONFIGS = [
-    "https://api-nemu.myproxy0108.workers.dev",
+    // ★ zstd を返す Worker をコメントアウト ★
+    // "https://api-nemu.myproxy0108.workers.dev",
     "https://mangarw-api.72016.workers.dev",
     "https://tuneninemui.nemu0001.workers.dev"
 ];
@@ -137,9 +138,6 @@ app.all('*', async (req, res) => {
         headers['X-Forwarded-Host'] = req.get('host');
         headers['X-Forwarded-Proto'] = 'https';
 
-        // ★★★ 圧縮を完全にオフにする ★★★
-        headers['Accept-Encoding'] = 'identity';
-
         try {
             const response = await fetch(targetUrl, {
                 method: req.method,
@@ -150,7 +148,6 @@ app.all('*', async (req, res) => {
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
             });
 
-            // デバッグログ（見やすく）
             console.log(`🔍 Request: ${req.method} ${req.url} -> ${targetUrl}`);
             console.log(`🔍 Response status: ${response.status}`);
             console.log(`🔍 Content-Encoding: ${response.headers.get('content-encoding') || 'none'}`);
@@ -173,10 +170,8 @@ app.all('*', async (req, res) => {
 
             // --- HTMLの場合 ---
             if (contentType.includes("text/html")) {
-                // ★ 圧縮されていない生のバッファを取得 ★
                 const buffer = await response.buffer();
 
-                // charset を取得
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
                 if (charsetMatch) {
@@ -185,17 +180,14 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // デコード
                 let text = iconv.decode(buffer, charset);
 
-                // UTF-8 で失敗したら Shift-JIS で再試行
                 if (charset === 'utf-8' && /[\uFFFD�]/.test(text)) {
                     console.warn('⚠️ UTF-8 decode broken, retrying Shift-JIS');
                     text = iconv.decode(buffer, 'shift_jis');
                     charset = 'shift_jis';
                 }
 
-                // 広告ブロックを注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
                 return res.status(response.status).send(text);
