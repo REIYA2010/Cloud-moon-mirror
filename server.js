@@ -2,6 +2,9 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
+const zlib = require('zlib');
+const { promisify } = require('util');
+const gunzip = promisify(zlib.gunzip);
 const app = express();
 
 // ==========================================
@@ -72,7 +75,7 @@ setInterval(async () => {
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 // ==========================================
-// 2. 広告ブロック用（ブラウザ側で動作）
+// 2. 広告ブロック用
 // ==========================================
 const INJECT_CODE = `
 <style>
@@ -118,7 +121,7 @@ const INJECT_CODE = `
 `;
 
 // ==========================================
-// 3. メインプロキシロジック
+// 3. メインプロキシ
 // ==========================================
 app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -138,12 +141,10 @@ app.all('*', async (req, res) => {
         headers['X-Forwarded-Proto'] = 'https';
 
         try {
-            // ★ compress オプションを削除（デフォルトの true が有効） ★
             const response = await fetch(targetUrl, {
                 method: req.method,
                 headers: headers,
                 agent: proxyAgent,
-                // compress: true,   // デフォルトなので指定不要
                 redirect: 'follow',
                 timeout: 12000,
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
@@ -157,7 +158,6 @@ app.all('*', async (req, res) => {
 
             markWorkerSuccess(worker);
 
-            // レスポンスヘッダーを転送（一部フィルタリング）
             response.headers.forEach((v, k) => {
                 if (!['content-encoding', 'transfer-encoding', 'content-length', 'content-security-policy'].includes(k.toLowerCase())) {
                     res.set(k, v);
@@ -166,12 +166,21 @@ app.all('*', async (req, res) => {
 
             const contentType = response.headers.get("content-type") || "";
 
-            // --- HTMLの場合 ---
+            // --- HTMLの場合（強制手動解凍） ---
             if (contentType.includes("text/html")) {
-                // ★ 自動的に gzip 解凍されたバッファを取得 ★
-                const buffer = await response.buffer();
+                let buffer = await response.buffer();
 
-                // ヘッダーからcharsetを取得（なければutf-8）
+                // ★ gzipなら強制解凍 ★
+                const contentEncoding = response.headers.get('content-encoding');
+                if (contentEncoding && contentEncoding.includes('gzip')) {
+                    try {
+                        buffer = await gunzip(buffer);
+                        console.log('✅ Manually gunzipped HTML');
+                    } catch (e) {
+                        console.warn('⚠️ Manual gunzip failed');
+                    }
+                }
+
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
                 if (charsetMatch) {
@@ -180,22 +189,16 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
-                // 指定charsetでデコード
                 let text = iconv.decode(buffer, charset);
 
-                // UTF-8でデコードして文字化けの兆候があればShift-JISで再試行
                 if (charset === 'utf-8' && /[\uFFFD�]/.test(text)) {
-                    console.warn('⚠️ UTF-8 decode appears broken, retrying with Shift-JIS');
+                    console.warn('⚠️ UTF-8 decode broken, retrying Shift-JIS');
                     text = iconv.decode(buffer, 'shift_jis');
                     charset = 'shift_jis';
                 }
 
-                // 広告ブロック用JS/CSSを注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
-
-                // レスポンスのContent-Typeをデコードに使ったcharsetに合わせる
                 res.set("Content-Type", `text/html; charset=${charset}`);
-
                 return res.status(response.status).send(text);
             }
 
