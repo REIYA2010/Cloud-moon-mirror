@@ -2,9 +2,6 @@ const express = require('express');
 const fetch = require('node-fetch');
 const https = require('https');
 const iconv = require('iconv-lite');
-const zlib = require('zlib');
-const { promisify } = require('util');
-const gunzip = promisify(zlib.gunzip);
 const app = express();
 
 // ==========================================
@@ -140,8 +137,8 @@ app.all('*', async (req, res) => {
         headers['X-Forwarded-Host'] = req.get('host');
         headers['X-Forwarded-Proto'] = 'https';
 
-        // ★★★ これが修正ポイント（zstdを除外） ★★★
-        headers['Accept-Encoding'] = 'gzip, deflate, br';
+        // ★★★ 圧縮を完全にオフにする ★★★
+        headers['Accept-Encoding'] = 'identity';
 
         try {
             const response = await fetch(targetUrl, {
@@ -153,11 +150,10 @@ app.all('*', async (req, res) => {
                 body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
             });
 
-            // デバッグログ（必要に応じて残す）
+            // デバッグログ（見やすく）
             console.log(`🔍 Request: ${req.method} ${req.url} -> ${targetUrl}`);
             console.log(`🔍 Response status: ${response.status}`);
-            console.log(`🔍 Content-Type: ${response.headers.get('content-type')}`);
-            console.log(`🔍 Content-Encoding: ${response.headers.get('content-encoding')}`);
+            console.log(`🔍 Content-Encoding: ${response.headers.get('content-encoding') || 'none'}`);
 
             if (response.status >= 500) {
                 console.warn(`⚠️ Worker [${worker.url}] returned HTTP ${response.status}. Retrying...`);
@@ -175,22 +171,12 @@ app.all('*', async (req, res) => {
 
             const contentType = response.headers.get("content-type") || "";
 
-            // --- HTMLの場合（強制手動解凍） ---
+            // --- HTMLの場合 ---
             if (contentType.includes("text/html")) {
-                let buffer = await response.buffer();
+                // ★ 圧縮されていない生のバッファを取得 ★
+                const buffer = await response.buffer();
 
-                const contentEncoding = response.headers.get('content-encoding');
-                if (contentEncoding && contentEncoding.includes('gzip')) {
-                    try {
-                        buffer = await gunzip(buffer);
-                        console.log('✅ Manually gunzipped HTML');
-                    } catch (e) {
-                        console.warn('⚠️ Manual gunzip failed');
-                    }
-                } else {
-                    console.log(`ℹ️ Encoding is "${contentEncoding}", skipping gunzip`);
-                }
-
+                // charset を取得
                 let charset = 'utf-8';
                 const charsetMatch = contentType.match(/charset=([^;]+)/);
                 if (charsetMatch) {
@@ -199,14 +185,17 @@ app.all('*', async (req, res) => {
                     charset = 'shift_jis';
                 }
 
+                // デコード
                 let text = iconv.decode(buffer, charset);
 
+                // UTF-8 で失敗したら Shift-JIS で再試行
                 if (charset === 'utf-8' && /[\uFFFD�]/.test(text)) {
                     console.warn('⚠️ UTF-8 decode broken, retrying Shift-JIS');
                     text = iconv.decode(buffer, 'shift_jis');
                     charset = 'shift_jis';
                 }
 
+                // 広告ブロックを注入
                 text = text.replace('<head>', '<head>' + INJECT_CODE);
                 res.set("Content-Type", `text/html; charset=${charset}`);
                 return res.status(response.status).send(text);
